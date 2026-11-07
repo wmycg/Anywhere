@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AstrBot Core 类关系与数据流</title>
+<style>
+  :root{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;color:#18232e;background:#f2f5f6;font-synthesis:none}
+  *{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}button,select{cursor:pointer}
+  .app{height:100vh;display:flex;flex-direction:column;min-width:0}
+  .topbar{min-height:62px;display:flex;align-items:center;gap:18px;padding:10px 18px;background:#fff;border-bottom:1px solid #d9e1e4;z-index:4}
+  .brand{min-width:210px}.brand h1{font-size:16px;line-height:1.25;margin:0}.brand small{display:block;color:#61717c;font-size:11px;margin-top:3px}
+  .tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1}.search{position:relative;width:min(260px,25vw)}
+  .search input,.tools select{width:100%;height:35px;background:#f8fafb;border:1px solid #cbd6dc;border-radius:5px;padding:0 10px;color:#283a45;outline:none}
+  .search input:focus,.tools select:focus{border-color:#008a8a;box-shadow:0 0 0 2px #008a8a25}.tools select{width:155px}
+  .search-results{display:none;position:absolute;top:40px;left:0;right:0;background:#fff;border:1px solid #cbd6dc;border-radius:5px;box-shadow:0 8px 24px #172b3930;max-height:320px;overflow:auto;z-index:20}
+  .search-results.open{display:block}.search-results button{display:block;width:100%;border:0;background:#fff;text-align:left;padding:9px 10px;font-size:12px;color:#20323c}.search-results button:hover,.search-results button:focus{background:#e8f5f3}.search-results small{display:block;margin-top:3px;color:#71808a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tool-button{height:35px;border:1px solid #cbd6dc;border-radius:5px;background:#fff;color:#344852;padding:0 10px;font-size:12px;white-space:nowrap}.tool-button:hover{background:#edf5f4}.tool-button.active{background:#d9f2ed;border-color:#4caaa0;color:#075b54}.tool-button:disabled{opacity:.45;cursor:not-allowed}
+  .layout{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 380px;min-height:0}.graph-wrap{position:relative;min-width:0;overflow:hidden;background:#f7faf9}
+  .graph{display:block;width:100%;height:100%;touch-action:none;cursor:grab;user-select:none;-webkit-user-select:none;background-image:radial-gradient(#cbd9d7 0.8px,transparent 0.8px);background-size:20px 20px}.graph,.graph *{user-select:none;-webkit-user-select:none}.graph.dragging{cursor:grabbing}
+  .graph-controls{position:absolute;bottom:16px;left:16px;display:flex;align-items:center;gap:4px;background:#fff;border:1px solid #cedad9;box-shadow:0 3px 14px #283b4520;border-radius:6px;padding:4px;z-index:2}.graph-controls button{width:34px;height:32px;border:0;border-radius:4px;background:#fff;color:#31434b;font-size:19px}.graph-controls button:hover{background:#e7f2f0}.graph-controls .fit{width:auto;font-size:12px;padding:0 8px}.zoom-label{font-size:11px;color:#52646c;min-width:42px;text-align:center}
+  .graph-hint{position:absolute;top:12px;left:16px;pointer-events:none;color:#61737b;background:#ffffffdf;padding:6px 9px;border-radius:4px;font-size:11px}
+  .panel{overflow:auto;background:#fff;border-left:1px solid #d9e1e4;padding:20px 20px 32px;min-width:0}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.panel h2{font-size:20px;line-height:1.35;overflow-wrap:anywhere;margin:5px 0 0}.eyebrow{font-size:11px;color:#0b746d;font-weight:700}.panel .lead{font-size:13px;line-height:1.8;color:#42545e;margin:14px 0}.panel h3{font-size:12px;color:#566a74;margin:22px 0 9px}.panel p,.panel li{font-size:13px;line-height:1.75;overflow-wrap:anywhere}.panel p{margin:5px 0 10px}.panel ul,.panel ol{padding-left:20px;margin:5px 0}.panel li{padding:2px 0}.panel code{font-family:Consolas,"Microsoft YaHei",monospace;font-size:12px;background:#eef4f3;border-radius:3px;padding:2px 4px;overflow-wrap:anywhere}.panel .file{font-size:12px;line-height:1.5;color:#607580;overflow-wrap:anywhere;margin-top:8px}.panel .badge{font-size:11px;color:#50646d;background:#edf3f4;border-radius:3px;padding:3px 6px;display:inline-block;margin-top:8px}.panel .link-list{display:grid;gap:6px}.panel a{color:#00786f;text-decoration:none;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.panel a:hover{text-decoration:underline}.panel .relation{width:100%;text-align:left;display:block;padding:9px 8px;border:1px solid #e0e8e9;border-radius:4px;background:#fafcfc;color:#29424a;margin:6px 0;font-size:12px;line-height:1.5}.panel .relation:hover{border-color:#51a9a1;background:#eff9f7}.panel .relation small{display:block;color:#687b82}.panel .relation-search{width:100%;height:36px;padding:0 9px;border:1px solid #cbd6dc;border-radius:4px;margin:14px 0 4px}.panel .empty{color:#657881;font-size:13px;line-height:1.7}.panel .close-panel{display:none}
+  .panel .node-relation{border:1px solid #dce7e5;border-radius:4px;margin:7px 0;background:#fafcfc}.panel .node-relation summary{padding:10px;cursor:pointer;color:#29424a;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.panel .node-relation[open] summary{border-bottom:1px solid #e2ebe9}.panel .relation-detail{padding:0 10px 10px}.panel .relation-detail h4{margin:14px 0 5px;color:#60747b;font-size:11px}.panel .relation-detail ol,.panel .relation-detail ul{padding-left:19px}.panel .relation-detail p,.panel .relation-detail li{font-size:12px}.panel .node-relation summary:focus-visible{outline:2px solid #008a80;outline-offset:2px}
+  .group-bg{fill:#fff;stroke:#d9e5e2;stroke-width:1}.group-title{font-size:15px;font-weight:700;fill:#354c53}.group-rule{stroke-width:3}.group-count{font-size:11px;fill:#73858a}
+  .edge-path{fill:none;stroke:#81949a;stroke-width:2;opacity:.64;pointer-events:none}.edge-hit{fill:none;stroke:transparent;stroke-width:18;pointer-events:stroke;cursor:pointer}.edge-label{font-size:11px;fill:#4d6068;paint-order:stroke;stroke:#f7faf9;stroke-width:6px;stroke-linejoin:round;pointer-events:none}.edge-group .edge-label{visibility:hidden}.edge-group:hover .edge-label,.edge-group.selected .edge-label{visibility:visible}.edge-group:hover .edge-path,.edge-group.selected .edge-path{stroke:#007f76;stroke-width:3.4;opacity:1}.edge-group.dim{opacity:.07;pointer-events:none}.edge-group.hidden{display:none}.edge-group.inherits .edge-path{stroke-dasharray:7 4}.edge-group.wraps .edge-path,.edge-group.produces .edge-path{stroke:#bf7a12}.edge-group.routes .edge-path{stroke:#3688a0;stroke-dasharray:5 3}
+  .node{cursor:pointer;outline:none}.node rect.card{fill:#fff;stroke:#b8cbc8;stroke-width:1.2;filter:drop-shadow(0 2px 3px #163d3510)}.node:hover rect.card,.node:focus rect.card,.node.selected rect.card{stroke:#008c80;stroke-width:2.8}.node.dim{opacity:.16}.node .accent{stroke-width:4}.node .kind{font-size:10px;font-weight:700;fill:#62777c}.node .name{font-size:14px;font-weight:700;fill:#1d3238}.node .filetext{font-size:10px;fill:#60777c}.node .description{font-size:11px;fill:#4c6268}.node .count{font-size:10px;fill:#738a8b}.node.key rect.card{fill:#fff7eb;stroke:#be652e;stroke-width:2.6;filter:drop-shadow(0 2px 5px #81451b30)}.node.key .key-badge{font-size:10px;font-weight:700;fill:#a54d1f}.node.external rect.card{fill:#f2f7ff;stroke:#3a69a5;stroke-width:2;stroke-dasharray:6 3}.node.external .kind{fill:#315e96}.node.key.external rect.card{fill:#fff7eb}.node.key:hover rect.card,.node.key:focus rect.card,.node.key.selected rect.card,.node.external:hover rect.card,.node.external:focus rect.card,.node.external.selected rect.card{stroke:#008c80;stroke-width:3}
+  @media(max-width:850px){.topbar{gap:8px;align-items:flex-start;flex-wrap:wrap;padding:9px 12px}.brand{min-width:0;width:100%}.brand small{display:none}.tools{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:5px;width:100%}.search{width:auto;min-width:0}.tools select{width:100%;min-width:0}.tool-button{width:100%;padding:0 5px}.layout{display:block;position:relative}.graph-wrap{height:100%}.panel{position:absolute;z-index:5;right:0;bottom:0;left:0;max-height:50%;border-left:0;border-top:1px solid #cddbd8;box-shadow:0 -5px 25px #1c343521;padding:15px 16px 24px;display:none}.panel.open{display:block}.panel .close-panel{display:block;border:0;background:#edf4f3;border-radius:4px;width:30px;height:30px;font-size:20px;color:#47615e}.panel h2{font-size:17px}.graph-hint{top:8px;left:8px}.graph-controls{bottom:10px;left:8px}.panel.open~.graph-controls{bottom:52%}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><h1>AstrBot Core 类关系与数据流</h1><small>源码关系图 · 节点唯一</small></div>
+    <div class="tools">
+      <div class="search"><input id="search" type="search" placeholder="搜索节点、文件或方法" aria-label="搜索节点、文件或方法" autocomplete="off"><div id="search-results" class="search-results" role="listbox"></div></div>
+      <select id="group-filter" aria-label="选择模块"><option value="">全部模块</option></select>
+      <button id="main-filter" class="tool-button" type="button" aria-pressed="true">主链关系</button>
+      <button id="neighbor-filter" class="tool-button" type="button" aria-pressed="false" disabled>聚焦一跳</button>
+      <button id="relation-index" class="tool-button" type="button">全部关系</button>
+      <button id="clear" class="tool-button" type="button">清除选择</button>
+    </div>
+  </header>
+  <main class="layout">
+    <div class="graph-wrap">
+      <div class="graph-hint">滚轮缩放 · 拖动平移 · 选中连线查看交接</div>
+      <svg id="graph" class="graph" role="group" aria-label="AstrBot Core 类关系图"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#728a8d"/></marker><marker id="triangle" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 12 6 L 0 12 z" fill="#fff" stroke="#728a8d" stroke-width="1.3"/></marker></defs><g id="world"><g id="groups"></g><g id="edges"></g><g id="nodes"></g></g></svg>
+      <div class="graph-controls" aria-label="画布控制"><button id="zoom-out" title="缩小" aria-label="缩小">−</button><span id="zoom-label" class="zoom-label">100%</span><button id="zoom-in" title="放大" aria-label="放大">+</button><button id="fit" class="fit" title="显示完整图">全图</button><button id="start" class="fit" title="回到开始区域">开始</button></div>
+    </div>
+    <aside id="panel" class="panel" aria-live="polite"></aside>
+  </main>
+</div>
+<script>
+const model = /* MODEL_DATA */;
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const $ = id => document.getElementById(id);
+  const svg = $('graph'), world = $('world'), panel = $('panel');
+  const nodes = new Map(), edges = new Map(), groups = new Map(model.groups.map(g => [g.id, g]));
+  const nodeEls = new Map(), edgeEls = new Map();
+  const size = { w: 260, h: 102 };
+  const state = { x: 20, y: 15, scale: 1, selectedNode: null, selectedEdge: null, main: true, neighbors: false, group: '' };
+  const kindNames = { class:'类', abstract:'抽象类', record:'数据模型', boundary:'协议边界', function:'函数', concept:'概念', external:'外部边界' };
+  const relationNames = { calls:'调用', consumes:'消费', creates:'创建', inherits:'继承', owns:'持有', produces:'产生', provides:'提供', reads:'读取', routes:'路由', sends:'发送', wraps:'包装', writes:'写入' };
+  const elem = (name, attrs = {}, text) => { const el = document.createElementNS(NS, name); Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v)); if (text != null) el.textContent = text; return el; };
+  const html = (name, className, text) => { const el = document.createElement(name); if(className) el.className = className; if(text != null) el.textContent = text; return el; };
+  const appendSection = (heading, contents, listType = 'p') => {
+    const values = Array.isArray(contents) ? contents : contents ? [contents] : [];
+    if (!values.length) return;
+    panel.appendChild(html('h3','',heading));
+    if (listType === 'p') values.forEach(v => panel.appendChild(html('p','', typeof v === 'string' ? v : JSON.stringify(v))));
+    else { const list = html(listType); values.forEach(v => list.appendChild(html('li','',typeof v === 'string' ? v : JSON.stringify(v)))); panel.appendChild(list); }
+  };
+  function sourceLinks(sources, target=panel, heading='源码位置') {
+    if (!sources || !sources.length) return;
+    target.appendChild(html(target===panel?'h3':'h4','',heading));
+    const list = html('div','link-list');
+    sources.forEach(s => {
+      const [path, start, end] = Array.isArray(s) ? s : [s.path,s.line,s.end_line || s.endLine];
+      if (!path) return;
+      const a = html('a','',`${path}${start ? ':' + start + (end && end !== start ? '–' + end : '') : ''} ↗`);
+      a.href = `${model.repository}/blob/${model.revision}/${path.split('/').map(encodeURIComponent).join('/')}${start ? '#L' + start + (end && end !== start ? '-L' + end : '') : ''}`;
+      a.target = '_blank'; a.rel = 'noopener noreferrer'; list.appendChild(a);
+    }); target.appendChild(list);
+  }
+  function panelHeader(type, title) {
+    panel.textContent = ''; panel.scrollTop=0;
+    const head = html('div','panel-head'), left = html('div');
+    left.appendChild(html('span','eyebrow',type)); left.appendChild(html('h2','',title));
+    const close = html('button','close-panel','×'); close.type='button'; close.setAttribute('aria-label','关闭详情'); close.onclick=()=>panel.classList.remove('open');
+    head.append(left,close); panel.appendChild(head); panel.classList.add('open');
+  }
+  function showOverview() {
+    panelHeader('阅读入口','节点与关系'); panel.classList.remove('open');
+    panel.appendChild(html('p','lead',model.subtitle));
+    appendSection('阅读顺序','从 InitialLoader 和 AstrBotCoreLifecycle 开始，沿事件入口、配置路由、Pipeline、Agent、Provider 与工具调用追踪到结果发送。');
+    appendSection('图中约定','每个节点代表一个类、函数、概念、外部数据源/边界或明确标出的协议边界。橙色底和“关键”标识突出重要节点；蓝色虚线框表示外部数据源/边界。箭头表示节点间关系，点击后可查看步骤与数据包装；部分箭头经过队列或调度器等中间层，详情会说明中间环节。默认只显示主链连线，全部关系可从工具栏进入。继承线使用空心三角；数据包装与产生用橙色，路由用蓝色虚线。');
+    appendSection('源码版本',`${model.revision}。图和源码链接以该提交为准；后续版本的实现和行号可能不同。`);
+  }
+  function setHash(value) {
+    const url=location.href.split('#')[0]+(value ? '#'+value : '');
+    try { history.replaceState(null,'',url); } catch { location.replace(url); }
+  }
+  function relationButton(e, center=false) {
+    const from=nodes.get(e.from),to=nodes.get(e.to),button=html('button','relation',`${from?.label || e.from} → ${to?.label || e.to}`);
+    button.type='button';button.appendChild(html('small','',`${relationNames[e.kind] || e.kind} · ${e.label}`));
+    button.onclick=()=>{showEdge(e.id);if(center)centerNode(e.from);};return button;
+  }
+  function nodeRelation(edge, currentId) {
+    const from=nodes.get(edge.from),to=nodes.get(edge.to),d=edge.details||{};
+    const details=html('details','node-relation'),summary=html('summary','',`${from?.label||edge.from} → ${to?.label||edge.to} · ${relationNames[edge.kind]||edge.kind}：${edge.label}`);
+    const content=html('div','relation-detail');details.append(summary,content);
+    const section=(title,value,listType)=>{const values=Array.isArray(value)?value:value?[value]:[];if(!values.length)return;content.appendChild(html('h4','',title));if(listType){const list=html(listType);values.forEach(v=>list.appendChild(html('li','',v)));content.appendChild(list);}else values.forEach(v=>content.appendChild(html('p','',v)));};
+    section('发生时机',d.when);section('调用与处理顺序',d.steps,'ol');section('数据与包装',d.dataFlow,'ul');section('条件与分支',d.conditions);section('结果与后续使用',d.result);
+    sourceLinks(d.sources,content,'此关系的源码依据');
+    const otherId=edge.from===currentId?edge.to:edge.from,other=nodes.get(otherId);
+    const jump=html('button','relation',`查看关联节点：${other?.label||otherId}`);jump.type='button';jump.onclick=()=>{showNode(otherId);centerNode(otherId);};content.appendChild(jump);
+    content.appendChild(relationButton(edge));return details;
+  }
+  function showRelations() {
+    panelHeader('关系目录',`全部关系 · ${edges.size}`);
+    const input=html('input','relation-search');input.type='search';input.placeholder='筛选类名、关系或调用';input.setAttribute('aria-label','筛选关系');
+    const list=html('div');panel.append(input,list);
+    const update=()=>{const q=input.value.trim().toLowerCase();list.textContent='';let count=0;for(const e of edges.values()){const searchable=[e.from,e.to,nodes.get(e.from)?.label,nodes.get(e.to)?.label,e.label,e.kind,...(e.details?.steps||[]),...(e.details?.dataFlow||[])].join(' ').toLowerCase();if(!q||searchable.includes(q)){list.appendChild(relationButton(e,true));count++;}}if(!count)list.appendChild(html('p','empty','没有匹配的关系'));};
+    input.addEventListener('input',update);update();
+  }
+  function showNode(id, updateHash=true) {
+    const node=nodes.get(id); if(!node)return;
+    state.selectedNode=id; state.selectedEdge=null;
+    $('neighbor-filter').disabled=false;
+    panelHeader(`${kindNames[node.kind] || node.kind} · ${groups.get(node.group)?.label || node.group}`,node.label);
+    if(node.importance==='key')panel.appendChild(html('span','badge','关键节点'));
+    if(node.kind==='external')panel.appendChild(html('span','badge','外部数据源 / 边界'));
+    panel.appendChild(html('p','lead',node.summary || ''));
+    panel.appendChild(html('div','file',node.file || ''));
+    const detail=node.explanation;
+    if(detail){appendSection('在程序中的职责',detail.role);appendSection('执行过程',detail.logic,'ol');appendSection('数据、状态与后续使用',detail.data,'ul');appendSection('容易混淆的地方',detail.caveats,'ul');sourceLinks(detail.sources,panel,'本节点详解的源码依据');}
+    appendSection('关键字段',node.fields,'ul'); appendSection('关键方法',node.methods,'ul');
+    const incoming=[...edges.values()].filter(e=>e.to===id),outgoing=[...edges.values()].filter(e=>e.from===id);
+    if(!detail)appendSection('说明范围','此节点目前提供摘要、成员及下方已追踪的关联流程；尚未补充独立的逐步源码详解。');
+    if(incoming.length){panel.appendChild(html('h3','',`指向此节点的关系 · ${incoming.length}`));incoming.forEach(e=>panel.appendChild(nodeRelation(e,id)));}
+    if(outgoing.length){panel.appendChild(html('h3','',`从此节点出发的关系 · ${outgoing.length}`));outgoing.forEach(e=>panel.appendChild(nodeRelation(e,id)));}
+    sourceLinks(node.sources); applyState(); if(updateHash) setHash('node='+encodeURIComponent(id));
+  }
+  function showEdge(id, updateHash=true) {
+    const edge=edges.get(id); if(!edge)return;
+    state.selectedEdge=id; state.selectedNode=null; state.neighbors=false;
+    $('neighbor-filter').disabled=true; const d=edge.details || {};
+    panelHeader(`关系 · ${relationNames[edge.kind] || edge.kind}`,`${nodes.get(edge.from)?.label || edge.from} → ${nodes.get(edge.to)?.label || edge.to}`);
+    panel.appendChild(html('span','badge',edge.label || edge.kind));
+    appendSection('发生时机',d.when); appendSection('调用与处理顺序',d.steps,'ol'); appendSection('数据与包装',d.dataFlow,'ul'); appendSection('条件与分支',d.conditions); appendSection('结果与后续使用',d.result); sourceLinks(d.sources);
+    applyState(); if(updateHash) setHash('edge='+encodeURIComponent(id));
+  }
+  function applyState() {
+    const related=new Set(); if(state.selectedNode){related.add(state.selectedNode);for(const e of edges.values())if(e.from===state.selectedNode||e.to===state.selectedNode){related.add(e.from);related.add(e.to);}}
+    const mainNodes=new Set(); for(const e of edges.values())if(e.main){mainNodes.add(e.from);mainNodes.add(e.to);}
+    for(const [id,el] of nodeEls){const n=nodes.get(id);const selected=id===state.selectedNode || !!state.selectedEdge && (edges.get(state.selectedEdge).from===id || edges.get(state.selectedEdge).to===id);const dim=!selected&&((state.group && n.group!==state.group)||(state.neighbors && !related.has(id))||(state.main && !mainNodes.has(id) && n.importance!=='key' && n.kind!=='external'));el.classList.toggle('dim',!!dim);el.classList.toggle('selected',selected);}
+    for(const [id,el] of edgeEls){const e=edges.get(id);const dim=id!==state.selectedEdge&&((state.group && nodes.get(e.from)?.group!==state.group && nodes.get(e.to)?.group!==state.group)||(state.neighbors && e.from!==state.selectedNode && e.to!==state.selectedNode));el.classList.toggle('dim',!!dim);el.classList.toggle('hidden',state.main&&!e.main&&id!==state.selectedEdge);el.classList.toggle('selected',id===state.selectedEdge);}
+    $('main-filter').classList.toggle('active',state.main);$('main-filter').setAttribute('aria-pressed',state.main);
+    $('neighbor-filter').classList.toggle('active',state.neighbors);$('neighbor-filter').setAttribute('aria-pressed',state.neighbors);
+  }
+  function transform(){world.setAttribute('transform',`translate(${state.x} ${state.y}) scale(${state.scale})`);$('zoom-label').textContent=Math.round(state.scale*100)+'%';}
+  function zoomAt(factor,x,y){const next=Math.max(.18,Math.min(2.5,state.scale*factor)),ratio=next/state.scale;state.x=x-(x-state.x)*ratio;state.y=y-(y-state.y)*ratio;state.scale=next;transform();}
+  function centerNode(id){const n=nodes.get(id);if(!n)return;const box=svg.getBoundingClientRect();state.scale=Math.max(.75,state.scale);state.x=box.width/2-(n.x+size.w/2)*state.scale;state.y=box.height/2-(n.y+size.h/2)*state.scale;transform();}
+  function startView(){state.scale=1;state.x=20;state.y=20;transform();}
+  function fitView(){const box=svg.getBoundingClientRect();state.scale=Math.min((box.width-30)/model.canvas.width,(box.height-30)/model.canvas.height);state.x=(box.width-model.canvas.width*state.scale)/2;state.y=(box.height-model.canvas.height*state.scale)/2;transform();}
+  const measure=document.createElement('canvas').getContext('2d');
+  function lines(text,maxWidth,font,maxLines){measure.font=font;const chars=Array.from(text||''),result=[];while(chars.length&&result.length<maxLines){let line='';while(chars.length&&measure.measureText(line+chars[0]).width<=maxWidth)line+=chars.shift();if(!line)line=chars.shift();result.push(line);}if(chars.length){let last=result.pop();while(last&&measure.measureText(last+'…').width>maxWidth)last=Array.from(last).slice(0,-1).join('');result.push(last+'…');}return result;}
+  model.nodes.forEach(n=>{if(!nodes.has(n.id))nodes.set(n.id,n);});
+  model.edges.forEach(e=>{if(nodes.has(e.from)&&nodes.has(e.to)&&!edges.has(e.id))edges.set(e.id,e);});
+  for(const g of model.groups){$('group-filter').appendChild(new Option(g.label,g.id));const group=elem('g');group.append(elem('rect',{x:g.x,y:g.y,width:g.w,height:g.h,rx:7,class:'group-bg'}),elem('line',{x1:g.x+16,y1:g.y+48,x2:g.x+g.w-16,y2:g.y+48,stroke:g.color,class:'group-rule'}),elem('text',{x:g.x+16,y:g.y+28,class:'group-title'},g.label),elem('text',{x:g.x+g.w-18,y:g.y+28,'text-anchor':'end',class:'group-count'},`${[...nodes.values()].filter(n=>n.group===g.id).length} 节点`));$('groups').appendChild(group);}
+  for(const e of edges.values()){
+    const a=nodes.get(e.from),b=nodes.get(e.to),same=a.x===b.x;let x1,y1,x2,y2,d;
+    if(same){const forward=b.y>a.y;x1=a.x+size.w/2;x2=b.x+size.w/2;y1=a.y+(forward?size.h:0);y2=b.y+(forward?0:size.h);const bend=Math.max(35,Math.abs(y2-y1)*.35);d=`M${x1},${y1} C${x1+110},${y1+(forward?bend:-bend)} ${x2+110},${y2-(forward?bend:-bend)} ${x2},${y2}`;}
+    else{const forward=b.x>a.x;x1=a.x+(forward?size.w:0);x2=b.x+(forward?0:size.w);y1=a.y+size.h/2;y2=b.y+size.h/2;const bend=Math.max(60,Math.abs(x2-x1)*.45);d=`M${x1},${y1} C${x1+(forward?bend:-bend)},${y1} ${x2-(forward?bend:-bend)},${y2} ${x2},${y2}`;}
+    const group=elem('g',{class:`edge-group ${e.kind}`,'data-edge-id':e.id,role:'button',tabindex:'0','aria-label':`${a.label} 到 ${b.label}：${e.label}`});
+    group.append(elem('path',{d,class:'edge-path','marker-end':`url(#${e.kind==='inherits'?'triangle':'arrow'})`}),elem('path',{d,class:'edge-hit'}),elem('text',{x:(x1+x2)/2,y:(y1+y2)/2-5,'text-anchor':'middle',class:'edge-label'},e.label));
+    group.addEventListener('click',ev=>{ev.stopPropagation();showEdge(e.id);});group.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();showEdge(e.id);}});$('edges').appendChild(group);edgeEls.set(e.id,group);
+  }
+  for(const n of nodes.values()){
+    const g=groups.get(n.group),classes=['node'];if(n.importance==='key')classes.push('key');if(n.kind==='external')classes.push('external');const group=elem('g',{class:classes.join(' '),'data-node-id':n.id,role:'button',tabindex:'0','aria-label':`${n.label}，${kindNames[n.kind]||n.kind}${n.importance==='key'?'，关键节点':''}`});
+    group.append(elem('rect',{x:n.x,y:n.y,width:size.w,height:size.h,rx:6,class:'card'}),elem('line',{x1:n.x+1,y1:n.y+9,x2:n.x+1,y2:n.y+size.h-9,stroke:g?.color||'#668',class:'accent'}),elem('text',{x:n.x+13,y:n.y+17,class:'kind'},kindNames[n.kind]||n.kind));
+    if(n.importance==='key')group.append(elem('text',{x:n.x+size.w-12,y:n.y+17,'text-anchor':'end',class:'key-badge'},'关键'));
+    const title=lines(n.label,size.w-26,'700 14px system-ui, "Microsoft YaHei", sans-serif',1)[0];group.append(elem('text',{x:n.x+13,y:n.y+38,class:'name'},title));group.append(elem('title',{},n.label));
+    lines(n.summary,size.w-26,'11px system-ui, "Microsoft YaHei", sans-serif',2).forEach((line,i)=>group.append(elem('text',{x:n.x+13,y:n.y+57+i*14,class:'description'},line)));
+    const file=(n.file||'').split('/').slice(-2).join('/');group.append(elem('text',{x:n.x+13,y:n.y+94,class:'filetext'},lines(file,size.w-26,'10px system-ui, "Microsoft YaHei", sans-serif',1)[0]||''));
+    group.addEventListener('click',ev=>{ev.stopPropagation();showNode(n.id);});group.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();showNode(n.id);}});$('nodes').appendChild(group);nodeEls.set(n.id,group);
+  }
+  let drag=null;svg.addEventListener('pointerdown',e=>{if(e.button!==0 || e.target.closest('[data-node-id],[data-edge-id]'))return;drag={id:e.pointerId,x:e.clientX,y:e.clientY,tx:state.x,ty:state.y};svg.setPointerCapture(e.pointerId);svg.classList.add('dragging');});
+  svg.addEventListener('pointermove',e=>{if(!drag||drag.id!==e.pointerId)return;state.x=drag.tx+e.clientX-drag.x;state.y=drag.ty+e.clientY-drag.y;transform();});
+  const stopDrag=e=>{if(drag&&drag.id===e.pointerId){drag=null;svg.classList.remove('dragging');}};svg.addEventListener('pointerup',stopDrag);svg.addEventListener('pointercancel',stopDrag);
+  svg.addEventListener('wheel',e=>{e.preventDefault();const r=svg.getBoundingClientRect();zoomAt(e.deltaY<0?1.15:1/1.15,e.clientX-r.left,e.clientY-r.top);},{passive:false});
+  $('zoom-in').onclick=()=>{const r=svg.getBoundingClientRect();zoomAt(1.2,r.width/2,r.height/2);};$('zoom-out').onclick=()=>{const r=svg.getBoundingClientRect();zoomAt(1/1.2,r.width/2,r.height/2);};$('fit').onclick=fitView;$('start').onclick=startView;
+  $('main-filter').onclick=()=>{state.main=!state.main;applyState();};$('neighbor-filter').onclick=()=>{if(state.selectedNode){state.neighbors=!state.neighbors;if(state.neighbors)state.main=false;applyState();}};$('relation-index').onclick=showRelations;
+  $('group-filter').onchange=e=>{state.group=e.target.value;applyState();if(state.group){const g=groups.get(state.group);state.x=20-g.x*state.scale;state.y=20-g.y*state.scale;transform();}};
+  $('clear').onclick=()=>{state.selectedNode=null;state.selectedEdge=null;state.neighbors=false;state.main=true;state.group='';$('group-filter').value='';$('neighbor-filter').disabled=true;setHash('');showOverview();applyState();};
+  const search=$('search'),results=$('search-results');search.addEventListener('input',()=>{const q=search.value.trim().toLowerCase();results.textContent='';if(!q){results.classList.remove('open');return;}const found=[...nodes.values()].filter(n=>[n.id,n.label,n.file,n.summary,...(n.methods||[])].join(' ').toLowerCase().includes(q)).slice(0,20);if(!found.length)results.appendChild(html('button','','没有匹配的节点'));found.forEach(n=>{const b=html('button','',n.label);b.type='button';b.appendChild(html('small','',n.file));b.onclick=()=>{search.value=n.label;results.classList.remove('open');showNode(n.id);centerNode(n.id);};results.appendChild(b);});results.classList.add('open');});
+  document.addEventListener('click',e=>{if(!e.target.closest('.search'))results.classList.remove('open');});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'){results.classList.remove('open');panel.classList.remove('open');}});
+  showOverview();startView();applyState();const params=new URLSearchParams(location.hash.slice(1));if(params.has('node')&&nodes.has(params.get('node'))){showNode(params.get('node'),false);centerNode(params.get('node'));}else if(params.has('edge')&&edges.has(params.get('edge'))){showEdge(params.get('edge'),false);centerNode(edges.get(params.get('edge')).from);}
+})();
+</script>
+</body>
+</html>

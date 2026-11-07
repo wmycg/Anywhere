@@ -1,0 +1,205 @@
+{
+  "AgentResponse": {
+    "role": "Agent Runner 向上层报告一次运行进展的信封；调用者根据 type 区分普通模型结果、流式片段、工具调用和工具结果等，而不是直接把信封发给平台。",
+    "logic": ["Runner 在执行期间逐个产出 AgentResponse；run_agent 遍历它们并按 type 选择记录、直接发送、暂存事件结果或者向调用方 yield。", "data 中的 chain 是 MessageChain；同一包装可承载普通正文、工具状态等不同语义，不能只根据其类型判断是否是最终回答。"],
+    "data": ["type: str 标识响应类别；data 是 AgentResponseData，包含 chain: MessageChain。", "工具直接输出可能通过 event.send 立即发送；普通结果通常作为事件结果进入后续处理。"],
+    "caveats": ["AgentResponse 是运行进度信封，不等同于 MessageEventResult，也不保证每个响应都代表完整回答。"],
+    "sources": [["astrbot/core/agent/response.py",8,16],["astrbot/core/astr_agent_run_util.py",150,213],["astrbot/core/astr_agent_run_util.py",246,297]]
+  },
+  "AgentStats": {
+    "role": "记录一次 Agent 运行的 token 用量、最近一次请求上下文 token 和时间信息，供运行统计与输出使用。",
+    "logic": ["默认构造独立 TokenUsage 对象；duration 属性通过 end_time 减 start_time 计算。", "to_dict 把 token_usage 转为字典副本，并附上上下文长度与各时间值。"],
+    "data": ["token_usage 表示用量统计；current_context_tokens 是最近一次请求输入 token，并非整个运行累计 token。", "start_time、end_time 和 time_to_first_token 是记录值；to_dict 不包含单独计算的 duration 字段。"],
+    "caveats": ["duration 是属性，不是等待运行完成的方法；开始或结束时间未设置时数值本身不代表完整耗时。"],
+    "sources": [["astrbot/core/agent/response.py",19,39]]
+  },
+  "ContentPart": {
+    "role": "Agent 上下文消息内部的内容片段基类，统一文本、推理、图片和音频等多种片段的校验与序列化。",
+    "logic": ["子类声明带默认值的 type 字段时登记到注册表；基类的 Pydantic 校验根据传入字典的 type 分发到具体片段类。", "mark_as_temp 为片段设置 _no_save；model_dump_for_context 可把该标记加入字典，供上下文后续处理。"],
+    "data": ["Message.content 可包含 ContentPart 列表，每个片段的具体字段由其子类定义。"],
+    "caveats": ["ContentPart 用于模型上下文，不是消息平台输出使用的 BaseMessageComponent；二者虽然都表示片段，服务的边界不同。", "临时标志由后续序列化/保存逻辑解释，不应推断所有 model_dump 调用都会自动删除临时片段。"],
+    "sources": [["astrbot/core/agent/message.py",19,80],["astrbot/core/agent/message.py",195,215],["astrbot/core/agent/message.py",345,359]]
+  },
+  "Message": {
+    "role": "Agent 上下文中的单条消息模型，统一用户、助手、工具和系统消息，并保留工具调用及其回复之间的关联。",
+    "logic": ["role 指定消息角色；content 可为字符串、ContentPart 列表、CheckpointData 或 None。", "模型校验按角色检查内容；序列化方法整理模型输出，供上下文和持久化链处理。"],
+    "data": ["tool_calls 是助手发出的工具调用列表；tool_call_id 关联工具回复。不同角色可具有不同字段组合。"],
+    "caveats": ["它是模型对话上下文中的一条记录，不是外部平台收到的一条原始事件，也不是 MessageChain。"],
+    "sources": [["astrbot/core/agent/message.py",195,248]]
+  },
+  "ToolCall": {
+    "role": "描述模型提出的一次工具调用，保存调用标识和函数名、参数，供工具执行及其回复关联使用。",
+    "logic": ["FunctionBody 保存工具 name 和 arguments；ToolCall 自身携带 id、type 与 function。", "自定义序列化对额外内容进行整理，以适配消息输出。"],
+    "data": ["function.arguments 是工具参数字符串；要真正执行工具，后续执行链还需要解析参数、查找工具并调用。", "id 与工具回复中的 tool_call_id 用于关联请求和结果。"],
+    "caveats": ["ToolCall 是调用意图的数据表示，本身不执行工具，也不直接代表 MCP 协议对象。"],
+    "sources": [["astrbot/core/agent/message.py",144,177],["astrbot/core/agent/message.py",195,212]]
+  },
+  "MessageChain": {
+    "role": "平台无关的一条输出消息，按顺序容纳 Plain、Image、At 等消息组件及发送格式选项。",
+    "logic": ["message、at、url_image 等方法向 chain 添加组件并返回自身，便于连续构造。", "derive 使用给定组件构造新 MessageChain，并继承 use_t2i_、use_markdown_、type；默认新链为空。", "get_plain_text 提取 Plain 文本；squash_plain 将所有 Plain 文本合并到第一个 Plain 组件，并保留非文本组件。"],
+    "data": ["chain 是有顺序的 BaseMessageComponent 列表；type 用于标注部分业务场景；use_t2i_/use_markdown_ 控制发送方式。"],
+    "caveats": ["MessageChain 本身不包含事件是否停止等结果控制语义；MessageEventResult 继承它并增加这些信息。", "derive 不会复制原组件列表，只有显式传入链时新链才包含那些组件。"],
+    "sources": [["astrbot/core/message/message_event_result.py",18,58],["astrbot/core/message/message_event_result.py",149,192]]
+  },
+  "MessageEventResult": {
+    "role": "事件处理阶段的结果对象：在 MessageChain 组件列表之外保存事件传播状态、结果来源和流式生成器。",
+    "logic": ["结果可由 event.set_result 暂存，再由 ResultDecorateStage 处理，最后由 RespondStage 读取。", "stop_event 和 continue_event 修改传播状态；set_result_content_type 标明一般、LLM 或流式等结果类型；set_async_stream 附加异步流。", "is_model_result 包含 LLM_RESULT 与 AGENT_RUNNER_ERROR，而 is_llm_result 只匹配前者。"],
+    "data": ["result_type 是 EventResultType；result_content_type 是 ResultContentType；async_stream 仅在流式路径使用。"],
+    "caveats": ["停止事件传播与停止 Agent 的运行是不同的控制概念。", "继承 MessageChain 不表示这个对象已经由平台发送。"],
+    "sources": [["astrbot/core/message/message_event_result.py",195,288],["astrbot/core/astr_agent_run_util.py",275,297],["astrbot/core/pipeline/respond/stage.py",194,210]]
+  },
+  "ResultDecorateStage": {
+    "role": "Pipeline 中的结果装饰阶段，在实际发送前对事件结果执行钩子、内容检查与可选格式处理。",
+    "logic": ["process 先取 event.get_result；结果不存在、组件为空或类型为 STREAMING_RESULT 时提前返回。", "符合条件时先检查 LLM 回复内容，再执行 OnDecoratingResultEvent 插件钩子；插件可以替换或清除结果，因此后续重新读取。", "非流式完成路径按配置处理回复前缀、文本分段、推理内容或 TTS 等，调整同一结果的 chain。"],
+    "data": ["输入与输出均围绕事件中的 MessageEventResult；Plain 文本可能被拆分或转成语音组件。"],
+    "caveats": ["流式结果与 STREAMING_FINISH 的处理不同；不能认为每个流式片段都经过普通文本分段或安全检查。", "实际发送由后续 RespondStage 和具体平台事件实现完成。"],
+    "sources": [["astrbot/core/pipeline/result_decorate/stage.py",126,205],["astrbot/core/pipeline/result_decorate/stage.py",209,277],["astrbot/core/pipeline/result_decorate/stage.py",317,343]]
+  },
+  "RespondStage": {
+    "role": "Pipeline 的发送阶段，将事件已有结果按普通或流式路径交给对应平台事件发送。",
+    "logic": ["先读取 event.get_result；空结果、已结束的流式状态、无有效内容，以及与主动发送工具重复的文本等条件会提前返回。", "STREAMING_RESULT 要求 async_stream，随后调用 event.send_streaming；普通结果则检查组件、根据配置分段并调用 event.send。", "普通发送完成后触发 OnAfterMessageSentEvent；未被钩子提前终止时清除事件结果。"],
+    "data": ["输入为 MessageEventResult；普通分段时使用 derive 创建携带原发送选项的 MessageChain。", "流式路径使用 MessageChain 片段的异步流；具体平台消息转换发生在事件的具体实现中。"],
+    "caveats": ["发送不总是一次完成：Record 或分段回复可能产生多次 event.send。", "流式分支调用 send_streaming 后直接返回，不应笼统描述为所有路径都会执行末尾的发送后钩子与清理。"],
+    "sources": [["astrbot/core/pipeline/respond/stage.py",194,245],["astrbot/core/pipeline/respond/stage.py",290,305],["astrbot/core/pipeline/respond/stage.py",337,409]]
+  },
+  "run_agent": {
+    "role": "连接 AgentRunner 与事件处理流程的异步生成器：逐项解释 AgentResponse，并让上层在恰当时机处理结果。",
+    "logic": ["循环消费 agent_runner.step()；工具调用和工具结果可记录追踪信息、发送状态消息或直接发送标记为 tool_direct_result 的消息。", "普通/非流式结果将 resp.data['chain'].chain 包装成 MessageEventResult 写入 event，然后 yield 原 MessageChain；生成器恢复执行时清理 event.result。", "原生流式分支对 streaming_delta 直接 yield MessageChain；按配置可能隐藏推理片段，也可能缓冲并合并普通 LLM 结果。", "停止信号、aborted 和异常各有处理；异常时非流式可设置错误结果，流式则 yield 错误消息链。"],
+    "data": ["输入包括 AgentRunner、AstrMessageEvent 与显示/流式选项；产物为异步生成的 MessageChain 或 None，并伴随 event 状态和可能的直接发送副作用。"],
+    "caveats": ["yield 会暂停该函数，让外层处理当前结果后才继续执行；不能把 set_result 与紧随其后的 clear_result 当成连续无间隔的两步。", "直接发送工具结果与经 Pipeline 的一般结果是不同分支。"],
+    "sources": [["astrbot/core/astr_agent_run_util.py",115,155],["astrbot/core/astr_agent_run_util.py",188,245],["astrbot/core/astr_agent_run_util.py",246,309],["astrbot/core/astr_agent_run_util.py",314,355]]
+  },
+  "ContentComponent": {
+    "role": "图中的 ContentComponent 表示源码里的 BaseMessageComponent 及其具体消息组件，服务于平台消息的收发。",
+    "logic": ["基础类提供组件类型和序列化接口；Plain、Image、At、Reply 等具体类型分别承载各自内容。", "平台适配器依据组件类型和数据转换为对应平台的消息格式。"],
+    "data": ["MessageChain.chain 保存组件实例，组件有顺序，类型决定平台适配器如何处理。"],
+    "caveats": ["ContentComponent 是图节点名称，源码基类名是 BaseMessageComponent。", "这里的组件不同于模型上下文中的 ContentPart。"],
+    "sources": [["astrbot/core/message/components.py",46,127],["astrbot/core/message/message_event_result.py",18,34]]
+  },
+  "_convert_conv_from_v2_to_v1": {
+    "role": "ConversationManager 的兼容转换：将数据库 ConversationV2 映射为旧接口使用的 Conversation 对象。",
+    "logic": ["复制平台、用户、标题、人格和 token 等元数据；conversation_id 变成 cid，时间转为 UTC 时间戳。", "include_history 为真时将 content 或空列表经 json.dumps 转为 history 字符串；为假时固定使用 '[]'。"],
+    "data": ["输入 ConversationV2.content 是列表或 None；输出 Conversation.history 是 JSON 字符串，两者并非同一表示。"],
+    "caveats": ["转换本身不读取数据库、不请求模型；需要向上追踪调用此方法的 get_conversation。"],
+    "sources": [["astrbot/core/conversation_mgr.py",62,90],["astrbot/core/conversation_mgr.py",190,214]]
+  },
+  "Conversation": {
+    "role": "保留给旧接口使用的对话记录数据类，包含对话标识、JSON 字符串形式的历史和展示元数据。",
+    "logic": ["ConversationManager 从数据库查询 ConversationV2 后调用兼容转换方法，构造这个数据对象并返回给旧接口调用方。"],
+    "data": ["cid 为对外对话 UUID；history 是字符串而不是列表；persona_id、title、token_usage 等描述当前对话。"],
+    "caveats": ["不要把它与数据库映射的 ConversationV2 混为一谈：前者 history 是 JSON 字符串，后者 content 是 JSON 列承载的列表。", "对话记录也不同于平台侧 PlatformMessageHistory；后者保存的平台消息有独立用途。"],
+    "sources": [["astrbot/core/db/po.py",582,603],["astrbot/core/conversation_mgr.py",62,90],["astrbot/core/conversation_mgr.py",202,214]]
+  },
+  "ConversationV2": {
+    "role": "SQLModel 数据表模型，映射 conversations 表，保存 Agent 对话历史及其索引元数据。",
+    "logic": ["SQLiteDatabase 使用 conversation_id 查询该表并返回模型；ConversationManager 根据需要将它转换成旧 Conversation。", "create_conversation 与 update_conversation 在数据库层创建或修改记录。"],
+    "data": ["inner_conversation_id 是自增数据库主键；conversation_id 是唯一对外 UUID；content 是 JSON 列，通常包含消息字典列表。", "platform_id、user_id、persona_id 与 token_usage 提供会话归属和附加信息。"],
+    "caveats": ["content 是模型对话上下文，不应假定它与平台全部原始消息历史完全相同。"],
+    "sources": [["astrbot/core/db/po.py",72,105],["astrbot/core/db/sqlite.py",355,360],["astrbot/core/db/sqlite.py",599,654]]
+  },
+  "SQLiteDatabase": {
+    "role": "BaseDatabase 的 SQLite 实现，为对话、定时任务和平台历史等数据提供异步持久化。",
+    "logic": ["构造时以 db_path 生成 sqlite+aiosqlite 数据库 URL，再由基类准备数据库访问设施。", "initialize 创建 SQLModel 中未存在的表，设置 WAL、busy_timeout 等 SQLite 参数，并执行若干兼容迁移与索引检查。", "对话和定时任务方法通过数据库会话查询或写入对应表模型。"],
+    "data": ["db_path 指向本地 SQLite 文件；conversation_id 查询 ConversationV2，CronJob 方法操作定时任务记录。"],
+    "caveats": ["BaseDatabase 规定调用契约；实际 SQL 和数据库文件访问由此具体实现承担。", "SQLite 文件是本地持久化边界，不等于单独的网络数据库服务。"],
+    "sources": [["astrbot/core/db/sqlite.py",77,105],["astrbot/core/db/sqlite.py",355,360],["astrbot/core/db/sqlite.py",599,654],["astrbot/core/db/sqlite.py",2634,2670]]
+  },
+  "BaseDatabase": {
+    "role": "数据库服务抽象契约，供会话、配置、定时任务等管理组件依赖，避免调用方直接绑定具体数据库实现。",
+    "logic": ["抽象接口定义初始化、对话和其他持久化操作；运行时由 SQLiteDatabase 等具体实现提供行为。"],
+    "data": ["接口的输入输出取决于具体操作，如对话 ID、查询条件与 ConversationV2 记录。"],
+    "caveats": ["抽象类不应被误读成独立存储服务；具体持久化、SQL 和实际文件由实现类决定。"],
+    "sources": [["astrbot/core/db/__init__.py",35,110],["astrbot/core/db/sqlite.py",77,91]]
+  },
+  "CronJobPayload": {
+    "role": "图中将定时任务负载及其衍生上下文归为一组，帮助追踪 Agent 如何在没有外部平台入站消息时被唤醒。",
+    "logic": ["_run_active_agent_job 从 CronJob.payload 读取 session；有投递会话时使用该会话，否则构造平台为 cron、类型为 OTHER_MESSAGE、会话 ID 为 job_id 的 MessageSession。", "note 依次回退到任务 description、name；代码把任务元数据放在 extras.cron_job，把原始 payload 放在 extras.cron_payload，然后调用 _woke_main_agent。", "_woke_main_agent 创建 CronMessageEvent，按其统一消息来源获取配置，再组装主 Agent。"],
+    "data": ["payload 是字典而非独立源码类；extras 同时承载抽出的 cron_job 信息和原始 cron_payload。", "delivery_session_str 与实际运行时 session_str 要区分：前者可以为空，而后者会有 cron 虚拟会话回退值。"],
+    "caveats": ["该节点是说明用概念分组，源码中没有名为 CronJobPayload 的独立类。", "构造 CronMessageEvent 不意味着收到了一条真实的平台入站消息。"],
+    "sources": [["astrbot/core/cron/manager.py",437,471],["astrbot/core/cron/manager.py",473,529],["astrbot/core/cron/manager.py",580,604]]
+  },
+  "CronJobManager": {
+    "role": "统一管理基础定时任务和主动 Agent 任务：保存定义、维护 APScheduler 调度并记录每次运行状态。",
+    "logic": ["start 保存 Context、启动调度器并同步数据库中启用且可恢复的任务；基础任务缺少内存 handler 时会跳过恢复。", "add_basic_job/add_active_job 先创建 CronJob 记录，再在启用时注册；_build_trigger 为单次任务构造 DateTrigger，为周期任务构造 CronTrigger。", "_run_job 根据 job_type 分派到普通 handler 或主动 Agent 路径，记录 running/completed/failed/cancelled，并在完成后更新下次运行信息。", "delete_job 移除调度，取消并等待已执行任务，再删除数据库记录。"],
+    "data": ["数据库 CronJob 保存任务配置和状态；_basic_handlers 是进程内的 job_id 到 handler 映射；_running_tasks 跟踪当前执行。"],
+    "caveats": ["普通任务 handler 存在于内存，不能仅靠数据库中的 payload 恢复可执行函数。", "调度器 next_run_time 会异步写回数据库，需要立即读取实时值时应使用 get_next_run_time。", "run_job_now 不会因为手动执行而删除单次任务。"],
+    "sources": [["astrbot/core/cron/manager.py",103,154],["astrbot/core/cron/manager.py",156,212],["astrbot/core/cron/manager.py",231,258],["astrbot/core/cron/manager.py",267,343],["astrbot/core/cron/manager.py",351,435]]
+  },
+  "SendMessageToUserTool": {
+    "role": "供 Agent 主动向指定会话发送消息的内置工具，既可用于定时任务，也可用于其他 Agent 场景。",
+    "logic": ["call 从运行上下文取得当前会话；目标会话不同时先检查管理员权限。", "验证 messages 列表，将 plain、image、record、video、file、mention_user 等输入转换成实际消息组件，必要时解析沙箱文件。", "解析目标 MessageSession；对不含冒号的裸 session ID 可尝试补当前会话的平台和消息类型；然后包装 MessageChain 并调用 Context.send_message。", "向当前会话成功发送时记录已发文本，供 RespondStage 避免重复回复。"],
+    "data": ["输入 messages 为字典数组，输出是工具执行结果字符串；副作用是调用平台发送消息。"],
+    "caveats": ["跨会话权限检查先于发送；并非任何用户均可向任意目标主动发消息。", "旧图引用到类定义但未覆盖 call 的实际实现，应包含 message_tools.py 第 209 行以后的源码。"],
+    "sources": [["astrbot/core/tools/message_tools.py",76,132],["astrbot/core/tools/message_tools.py",209,260],["astrbot/core/tools/message_tools.py",302,363],["astrbot/core/star/context.py",665,696]]
+  },
+  "SQLiteFile": {
+    "role": "本地磁盘中的 SQLite 数据库文件边界，持久保存对话、定时任务和其他数据库表。",
+    "logic": ["默认 DB_PATH 由数据目录与 data_v4.db 组合；SQLiteDatabase 使用异步 SQLite URL 连接并在初始化时创建或维护表结构。", "ConversationV2 映射其中 conversations 表，其 content 列保存对话消息列表。"],
+    "data": ["数据库中的记录与 Python 中的 SQLModel 实例通过 SQLiteDatabase 的查询和写入方法转换。"],
+    "caveats": ["这是物理文件/持久化边界，不是 Python 类，也不是必然存在的远端数据库服务。"],
+    "sources": [["astrbot/core/config/default.py",38,38],["astrbot/core/db/sqlite.py",77,103],["astrbot/core/db/po.py",72,96]]
+  },
+  "ProfileConfigData": {
+    "role": "图中的配置数据边界：包含配置档案及用于按消息来源选择档案的持久化信息。",
+    "logic": ["AstrBotConfigManager 管理配置对象与档案元数据；UmopConfigRouter 管理消息来源模式到配置 ID 的映射。", "事件路由按 UMO 查询配置档案，随后选择相应 PipelineScheduler；配置记录提供的是决策数据，具体路由由代码完成。"],
+    "data": ["配置内容、abconf_mapping 元数据与 umop_config_routing 映射是不同数据，不应合并想象成同一个文件。"],
+    "caveats": ["这是多种配置存储的概念边界，不是单个源码类或单个固定文件。"],
+    "sources": [["astrbot/core/astrbot_config_mgr.py",49,101],["astrbot/core/astrbot_config_mgr.py",172,190],["astrbot/core/umop_config_router.py",14,25],["astrbot/core/event_bus.py",55,73]]
+  },
+  "CronMessageEvent": {
+    "role": "定时任务主动唤醒 Agent 时构造的合成消息事件。它继承 AstrMessageEvent，使后续构建 Agent 的代码可复用统一事件接口。",
+    "logic": ["构造时根据 MessageSession 创建 PlatformMetadata 和 AstrBotMessage：将 note 文本包装为 Plain 消息组件，并生成消息 ID、发送者及时间戳。", "父类初始化后保存原 session 与 Context，设置唤醒状态，并把定时任务 extras 合并进事件。", "显式调用 send 时通过 Context.send_message(session, chain) 找到目标平台；send_streaming 逐个消费片段并调用 send。"],
+    "data": ["传入的 MessageSession 确定会话；AstrBotMessage 是内部合成的消息对象；extras 可携带 cron_job 和 cron_payload。"],
+    "caveats": ["它不是平台发来的原生事件；定时任务在 CronJobManager 中直接构建 Agent，不能假定先经过 EventBus 和完整 Pipeline。", "调用 Agent 后产生最终文本不必然自动发送给目标会话；需要实际发送路径。", "无配置投递 session 时可能使用 cron 虚拟会话，具体发送能否成功取决于 Context 是否找到对应平台。"],
+    "sources": [["astrbot/core/cron/events.py",17,74],["astrbot/core/cron/manager.py",437,471],["astrbot/core/cron/manager.py",473,529],["astrbot/core/star/context.py",665,696]]
+  },
+  "PlatformMessageHistoryManager": {
+    "role": "按平台实例与统一消息来源保存、读取平台消息历史，对上层隐藏具体数据库实现。",
+    "logic": ["insert_message_chain 遍历 MessageChain，将 Plain 转为文本、At 和 Reply 转为带必要字段的字典，图片、语音、视频和文件等则转成文本占位标记。", "有有效片段时通过 insert 委托数据库写入 content={'type': role, 'message': parts}；没有有效片段时返回 None。", "get 委托数据库分页查询并反转列表；update、delete、count 等继续委托对应数据库方法。"],
+    "data": ["保存内容是平台无关、避免包含本地路径的表示；max_messages 可交由数据库限制保留条数。", "部分操作可附带 sender_id、sender_name 和 llm_checkpoint_id。"],
+    "caveats": ["这里保存的平台历史与 ConversationV2.content 中的模型上下文属于不同记录与用途。", "媒体在此路径中是类型占位，不是保存完整媒体文件；不能从占位内容还原原文件。"],
+    "sources": [["astrbot/core/platform_message_history_mgr.py",7,32],["astrbot/core/platform_message_history_mgr.py",34,119],["astrbot/core/platform_message_history_mgr.py",121,165],["astrbot/core/db/po.py",246,278]]
+  },
+  "ConversationManager": {
+    "role": "为统一消息来源管理当前对话 ID，并通过数据库读取和更新对应的模型对话历史。",
+    "logic": ["new_conversation 根据 UMO 推断平台 ID，调用数据库创建记录，将 conversation_id 写入内存映射和 SharedPreferences 的 sel_conv_id。", "get_curr_conversation_id 优先读取内存，缺失时再读取 SharedPreferences 并回填；switch_conversation 同步更新内存和持久化选择。", "get_conversation 根据 ID 查询 ConversationV2；可选地在未找到时新建，最后转换成兼容 Conversation 返回。", "update_conversation 更新对话内容及有关元数据；删除当前对话时同时清除当前选择。"],
+    "data": ["统一消息来源 UMO 用于定位当前选中对话；conversation_id 是具体对话 UUID，二者不是同一种标识。", "数据库记录 content 为消息列表；兼容 Conversation.history 为 JSON 字符串。"],
+    "caveats": ["当前选中对话的映射和数据库里的全部对话记录是两层状态。", "平台消息历史有单独的 PlatformMessageHistoryManager；不要把它当作此处模型上下文的同义词。"],
+    "sources": [["astrbot/core/conversation_mgr.py",19,29],["astrbot/core/conversation_mgr.py",62,90],["astrbot/core/conversation_mgr.py",92,158],["astrbot/core/conversation_mgr.py",174,214],["astrbot/core/conversation_mgr.py",279,309]]
+  },
+  "OneBotProtocol": {
+    "role": "图中表示项目与 OneBot 兼容端之间的外部协议边界；入站数据由 aiocqhttp 适配器接收，出站由其事件实现调用 Bot API。",
+    "logic": ["AiocqhttpAdapter.convert_message 处理来自 SDK 的原生 Event，生成 AstrBotMessage 等内部表示。", "发送时 AiocqhttpMessageEvent 将 MessageChain 转成消息段字典列表，并按会话类型调用 bot.send_group_msg 或 bot.send_private_msg；有些条件下回退到 bot.send。"],
+    "data": ["边界两侧分别是平台原生 Event/消息段与 AstrBotMessage、MessageChain/消息组件。"],
+    "caveats": ["这是外部协议及 SDK 调用边界，不是 AstrBot 的 Python 类。", "仅依据项目调用点描述；兼容端的内部处理与成功送达不能由这里保证。"],
+    "sources": [["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",128,150],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py",68,120]]
+  },
+  "LLMProviderAPI": {
+    "role": "图中表示模型提供方的外部 HTTP/SDK 调用边界；本图以 ProviderOpenAIOfficial 所调用的 Chat Completions 接口为例。",
+    "logic": ["Provider 将可用 ToolSet 转成 OpenAI 风格工具描述，并根据配置整理 payload 与 extra_body。", "普通或流式方法调用 client.chat.completions.create，接收完成结果或流式数据后由项目中的解析逻辑转换。"],
+    "data": ["请求侧包含模型消息、可选工具描述、工具选择及额外参数；响应侧是 SDK 返回的完成结果或流式片段。"],
+    "caveats": ["该节点是外部服务边界，不是 Python 类；本项目中的调用不能证明提供方内部如何推理或存储数据。", "此处为 OpenAI 兼容实现示例，不代表所有 Provider 都使用相同协议。"],
+    "sources": [["astrbot/core/provider/sources/openai_source.py",535,588],["astrbot/core/provider/sources/openai_source.py",595,635],["astrbot/core/provider/sources/openai_source.py",839,850]]
+  },
+  "MCPServer": {
+    "role": "外部 MCP 服务边界，为本项目的 MCPClient 提供工具发现及工具调用能力。",
+    "logic": ["MCPClient 建立 session 后，list_tools_and_save 调用 session.list_tools 并保存工具列表。", "FunctionToolManager 将发现到的工具逐个包装成 MCPTool；MCPTool 调用时经 MCPClient.call_tool_with_reconnect 转发到 session.call_tool。"],
+    "data": ["发现结果由项目读取为工具列表，工具被包装时包含 mcp_tool、mcp_client 和 server 名称；调用时传递工具名及参数。"],
+    "caveats": ["MCPServer 是协议对端，不是 AstrBot 源码中的类；服务端内部实现及外部副作用超出本图可验证范围。", "工具发现不等于工具已经被调用；注册包装和实际执行发生在不同阶段。"],
+    "sources": [["astrbot/core/agent/mcp_client.py",653,665],["astrbot/core/agent/mcp_client.py",726,765],["astrbot/core/agent/mcp_client.py",793,820],["astrbot/core/provider/func_tool_manager.py",694,713]]
+  },
+  "ToolCallsResult": {
+    "role": "把一次助手工具调用消息和对应的一组工具结果消息放在一起，供后续模型请求继续使用。",
+    "logic": ["to_openai_messages 按助手调用消息在前、工具结果消息在后的顺序序列化成字典列表。", "to_openai_messages_model 保留消息模型对象；ProviderRequest.append_tool_calls_result 可把结果追加到请求。"],
+    "data": ["tool_calls_info 为 AssistantMessageSegment；tool_calls_result 为 ToolCallMessageSegment 列表。"],
+    "caveats": ["这个对象是一次工具调用往返的消息组合，不是工具执行器，也不是模型发出的 ToolCall 数据本身。"],
+    "sources": [["astrbot/core/provider/entities.py",169,192],["astrbot/core/provider/entities.py",218,253]]
+  },
+  "TokenUsage": {
+    "role": "统一表示一次或累计的 token 用量，支持按字段汇总或求差。",
+    "logic": ["input 属性计算 input_other 与 input_cached 的和，total 再加 output。", "加法和减法分别对三个原始字段逐项运算，生成新的 TokenUsage；AgentStats 可持有它。"],
+    "data": ["input_other 是非缓存输入，input_cached 是缓存输入，output 是输出 token；input 和 total 是计算属性。"],
+    "caveats": ["input、total 不是额外独立累计项，不应在 input_other/input_cached 之外再次相加。", "减法直接按字段相减；具体值是否合理取决于调用方提供的数据。"],
+    "sources": [["astrbot/core/provider/entities.py",422,452],["astrbot/core/agent/response.py",19,39]]
+  }
+}

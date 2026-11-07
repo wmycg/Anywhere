@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Relationship Map"
+  short_description: "Explore source-backed runtime flows and data relationships"
+  default_prompt: "Use $codebase-relationship-map to trace the requested flow through this repository."

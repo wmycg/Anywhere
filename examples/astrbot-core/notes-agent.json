@@ -1,0 +1,316 @@
+{
+  "ProcessStage": {
+    "role": "Pipeline 中处理插件和 Agent 请求的分流阶段；它连接会话等待器、插件 handler 与默认 LLM 路径。",
+    "logic": ["initialize() 创建并初始化 AgentRequestSubStage 和 StarRequestSubStage。", "process() 先检查会话等待器过滤器，命中未完成的等待会话时触发等待器并停止事件。", "读取 activated_handlers，逐个委托插件子阶段；插件产生 ProviderRequest 时把它放入 event.extra 并调用 Agent 子阶段。", "之后仅在 AI 启用、事件满足唤醒且尚未执行发送等条件下进入默认 Agent 分支。"],
+    "data": ["输入为 AstrMessageEvent；插件请求通过 event.extra.provider_request 传给后续 Agent；处理过程中通过 yield 让 Pipeline 继续。"],
+    "caveats": ["收到事件不代表一定调用模型：等待器、插件返回、配置、唤醒和事件状态都会影响分支。"],
+    "sources": [["astrbot/core/pipeline/process_stage/stage.py",16,75]]
+  },
+  "StarRequestSubStage": {
+    "role": "执行当前事件已经匹配到的插件 handler，把 handler 的结果继续传递给 ProcessStage。",
+    "logic": ["从事件扩展字段读取 activated_handlers 和 handlers_parsed_params，按 handler 全名找到参数。", "从 star_map 获取插件元信息；找不到插件则记录并跳过。调用 call_handler(event, handler.handler, **params)，透传异步产出。", "记录 handler 的开始、结束或错误；错误时触发插件错误钩子，条件满足时写入消息结果并停止事件。"],
+    "data": ["输入是带有已匹配 handler 和解析参数的 AstrMessageEvent；输出可能包含 ProviderRequest，也可能通过事件结果与 yield 向后续阶段传值。"],
+    "caveats": ["这里消费的是前面阶段已经激活的 handler；自身不是所有插件的加载和注册器。"],
+    "sources": [["astrbot/core/pipeline/process_stage/method/star_request.py",21,72],["astrbot/core/pipeline/process_stage/method/star_request.py",73,124]]
+  },
+  "ThirdPartyAgentSubStage": {
+    "role": "第三方 Agent Runner 的 Pipeline 分支；把事件输入整理成请求后，依据配置选择外部 Runner，并处理其响应。",
+    "logic": ["initialize() 获取 runner_type、runner_config 和流式策略。", "process() 检查 Provider 唤醒前缀，创建 ProviderRequest，复制 UMO、文本并收集可用图片和音频；内容为空则结束。", "执行请求钩子，再按 runner_type 创建 Dify、Coze、Dashscope 或 DeerFlow Runner；未知类型抛出 ValueError。", "根据平台流式能力与事件设置选择响应处理路径。"],
+    "data": ["事件文本、图片和音频成为 ProviderRequest；AstrAgentContext 把插件 Context 与事件交给所选 Runner。"],
+    "caveats": ["它与 InternalAgentSubStage 的本地工具循环是不同分支；各第三方服务的具体协议实现仍需继续查看对应 Runner。"],
+    "sources": [["astrbot/core/pipeline/process_stage/method/agent_sub_stages/third_party.py",157,178],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/third_party.py",280,362]]
+  },
+  "SessionServiceManager": {
+    "role": "按会话管理 LLM、TTS 等服务启停状态；Agent 请求阶段用它判断该会话是否允许 LLM 请求。",
+    "logic": ["is_llm_enabled_for_session() 通过共享首选项以 UMO 为 scope 读取 session_service_config.llm_enabled；未设置时默认启用。", "set_llm_status_for_session() 读取配置、更新 llm_enabled 并写回。", "should_process_llm_request(event) 提取 event.unified_msg_origin 并调用会话级判断。"],
+    "data": ["持久化键为 session_service_config；输入的 session_id 是 UMO 字符串，结果为布尔值。"],
+    "caveats": ["会话级开关与 Pipeline 配置中的全局/档案级 provider_settings.enable 是不同检查，两个条件均可能阻止请求。"],
+    "sources": [["astrbot/core/star/session_llm_manager.py",7,78],["astrbot/core/pipeline/process_stage/method/agent_request.py",39,50]]
+  },
+  "AbstractProvider": {
+    "role": "Provider 家族的公共基类，保存提供商配置、当前模型名和自定义请求头；聊天 Provider 是它的子类之一。",
+    "logic": ["构造时保存 provider_config，并据 custom_headers 构造请求头。", "set_model()/get_model() 管理当前模型名称；meta() 根据 provider_config.type 查询已注册元数据并构造 ProviderMeta。"],
+    "data": ["provider_config.id、type 和 model_name 等组合成对外使用的 ProviderMeta；未找到对应类型注册信息时 meta() 抛出 ValueError。"],
+    "caveats": ["它不实现具体聊天网络请求；text_chat 契约在子类 Provider 定义，具体适配器再实现。"],
+    "sources": [["astrbot/core/provider/provider.py",33,75]]
+  },
+  "ProviderOpenAIOfficial": {
+    "role": "Provider 的具体实现，使用 OpenAI 兼容聊天接口，把内部请求数据转换为 SDK payload，并将 completion 解析为统一 LLMResponse。",
+    "logic": ["text_chat() 调用 _prepare_chat_payload()，整理上下文、当前用户内容、系统提示与工具结果，选择模型并形成 messages/model payload。", "_query() 将 ToolSet 转换为 OpenAI 风格工具定义，将非标准参数放入 extra_body，经过重试封装调用 client.chat.completions.create()。", "_parse_openai_completion() 读取 SDK 的 ChatCompletion，提取文本、推理、工具调用等内容；缺少 choices 时抛出空输出错误。", "text_chat_stream() 提供流式调用路径，具体分块与完整结果的处理需要结合对应方法阅读。"],
+    "data": ["输入是内部请求拆解后的 prompt、contexts、func_tool 和 tool_calls_result；远程 SDK 返回 ChatCompletion，解析结果是 LLMResponse。"],
+    "caveats": ["这是具体适配器示例，不代表其他 Provider 必然使用相同协议；兼容服务、额外请求参数及媒体支持可能改变行为。"],
+    "sources": [["astrbot/core/provider/sources/openai_source.py",532,590],["astrbot/core/provider/sources/openai_source.py",838,870],["astrbot/core/provider/sources/openai_source.py",956,1006],["astrbot/core/provider/sources/openai_source.py",1192,1240]]
+  },
+  "BaseAgentRunner": {
+    "role": "定义 Agent 运行器通用接口和状态访问方式的基类；本地 ToolLoopAgentRunner 等实现具体运行逻辑。",
+    "logic": ["reset() 在运行前准备 ContextWrapper 和 hooks；step() 处理一步并异步产出 AgentResponse；step_until_done() 按步运行。", "done() 判断是否结束，get_final_llm_resp() 提供最终模型响应；state 与 _transition_state() 管理状态读取和变化。"],
+    "data": ["AgentState 定义 IDLE、RUNNING、DONE、ERROR；输入和输出依具体 Runner 实现补充。"],
+    "caveats": ["接口定义并不说明每种 Runner 的模型服务、工具执行或停止方式，不能把本地 Runner 的细节套到所有实现。"],
+    "sources": [["astrbot/core/agent/runners/base.py",14,72]]
+  },
+  "ContextManager": {
+    "role": "Agent 模型请求前的消息上下文处理器，根据轮数和 token 限制截断或压缩消息，缓解上下文过长。",
+    "logic": ["构造时优先使用自定义 compressor；否则按是否配置 LLM 压缩 Provider 选择 LLM 摘要压缩或按轮截断压缩。", "process() 先按 enforce_max_turns 截断，再在 max_context_tokens 大于 0 时估算 token 并决定是否压缩。", "压缩后如仍超限，_run_compression() 保留前面的系统消息和最新一轮，逐轮移除更早消息并重新计算。", "处理抛错时记录异常并返回原始消息列表。"],
+    "data": ["输入和输出均是 list[Message]；trusted_token_usage 用于 token 估算。ToolLoopAgentRunner 在每轮请求前使用处理后的 messages。"],
+    "caveats": ["这里的 ContextManager 是模型消息压缩器，不是插件服务 Context 或会话管理器；最新一轮单独超限时也会保留并继续发送。"],
+    "sources": [["astrbot/core/agent/context/manager.py",11,39],["astrbot/core/agent/context/manager.py",40,80],["astrbot/core/agent/context/manager.py",81,143],["astrbot/core/agent/runners/tool_loop_agent_runner.py",827,839]]
+  },
+  "BaseFunctionToolExecutor": {
+    "role": "工具执行器的通用接口，声明接收 FunctionTool、ContextWrapper 和工具参数的 execute() 异步生成器。",
+    "logic": ["调用者通过 execute(tool, run_context, **tool_args) 传入工具与运行上下文，并异步消费执行结果。", "AstrBot 的 FunctionToolExecutor 提供具体本地、MCP、委派和后台工具分支。"],
+    "data": ["返回的生成器元素允许一般结果或 MCP CallToolResult；具体行为以实际执行器为准。"],
+    "caveats": ["这个基类的 execute 只有接口占位，不应把它画成真正执行远程或本地工具的实现。"],
+    "sources": [["astrbot/core/agent/tool_executor.py",1,18],["astrbot/core/astr_agent_tool_exec.py",136,205]]
+  },
+  "HandoffTool": {
+    "role": "代表向另一个 Agent 委派任务的特殊 FunctionTool；通过统一工具接口让主 Agent 能发出委派请求。",
+    "logic": ["初始化时把工具命名为 transfer_to_<agent.name>，保存目标 Agent，并根据需要提供参数与描述。", "默认参数包括任务 input、可选 image_urls 和 background_task。", "FunctionToolExecutor.execute() 识别 HandoffTool，根据 background_task 决定前台或后台的委派路径。"],
+    "data": ["agent 是 Agent 配置对象；provider_id 可作为子 Agent 的可选提供商覆盖；输入是模型提供的委派参数。"],
+    "caveats": ["该类本身主要描述委派工具及目标，子 Agent 的实际执行在 FunctionToolExecutor 的 handoff 分支。"],
+    "sources": [["astrbot/core/agent/handoff.py",9,65],["astrbot/core/astr_agent_tool_exec.py",136,161]]
+  },
+  "MainAgentBuildConfig": {
+    "role": "主 Agent 构建配置的数据类，集中描述本次构建所需的模型、工具、上下文、文件和运行环境策略，由 build_main_agent() 与运行器读取。",
+    "logic": ["tool_call_timeout 控制工具调用超时，tool_schema_mode 决定工具描述模式；provider_wake_prefix 和 streaming_response 分别影响触发与响应。", "max_context_length、dequeue_context_length 及 llm_compress_* 设置会传给 Runner 的上下文管理逻辑；fallback_provider_ids 和 request_max_retries 控制候选提供商及请求重试。", "kb_agentic_mode、file_extract_enabled、computer_use_runtime 与 add_cron_tools 决定知识库、附件与工具的准备方式。"],
+    "data": ["它由多项配置值构成，并非事件或模型请求本身；InternalAgentSubStage 使用当前事件的唤醒前缀和流式设置生成本次使用的配置副本。"],
+    "caveats": ["该类的字段定义说明可用配置，实际生效条件还要查看构建和执行分支；不要假设每次运行都会使用所有工具。"],
+    "sources": [["astrbot/core/astr_main_agent.py",188,247],["astrbot/core/astr_main_agent.py",2002,2027],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",253,270]]
+  },
+  "MainAgentBuildResult": {
+    "role": "build_main_agent() 成功时返回的组合结果，把构建好的运行器、请求和选中的 Provider 交给调用方继续执行。",
+    "logic": ["agent_runner 用于后续运行；provider_request 是本次构建或补充的请求；provider 是已选择的具体聊天提供商。", "当调用 build_main_agent(apply_reset=False) 时，reset_coro 保存待执行的 reset 协程；调用方可先处理请求钩子再等待初始化。"],
+    "data": ["这四个字段是不同对象的引用：配置与调用所需信息汇聚到结果，并非模型响应或最终用户回复。"],
+    "caveats": ["构建函数也可能返回 None；调用方必须处理失败或跳过分支。reset_coro 不为空时，不能假设 Runner 已经初始化。"],
+    "sources": [["astrbot/core/astr_main_agent.py",250,255],["astrbot/core/astr_main_agent.py",2002,2042],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",263,286],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",307,325]]
+  },
+  "collect_initial_request": {
+    "role": "从当前事件、插件提供的请求和会话历史收集主 Agent 的初始输入，产生 ProviderRequest 和引用图片线索。它负责收集，不等于最终向模型发送请求。",
+    "logic": ["没有显式 req 时，先检查 event.extra 中是否有 provider_request；有则做浅拷贝并复制部分列表，关联会话存在时重新加载历史，避免排队期间错过已保存的消息。", "没有插件请求时新建 ProviderRequest，检查模型唤醒前缀并提取消息文本；前缀不匹配时返回 (None, None)。", "读取消息中的图片、音频、文件和视频及引用消息附件；图片或音频不可用时按分支记录日志或添加占位，引用图片也可通过回退提取。", "从会话服务获取当前 Conversation，将其 history 解析为 contexts，并把请求登记到事件的 provider_request 扩展字段；最后对图片引用去重并返回二元组。"],
+    "data": ["输入包括 AstrMessageEvent、插件 Context、MainAgentBuildConfig、可选 ProviderRequest 和可选引用图片集合。", "输出是 (ProviderRequest | None, quote_image_ref | None)；第二项是引用消息中的首个嵌入图片引用，不是完整图片集合。"],
+    "caveats": ["浅拷贝不是对整个对象图的深拷贝；提供显式 req 时，其附件视为已收集，流程与新建请求不同。", "插件请求关联的会话已不存在时，事件会记录错误并返回空结果。图片准备、模型能力判断和后续请求装饰由调用方继续处理。"],
+    "sources": [["astrbot/core/astr_main_agent.py",1468,1538],["astrbot/core/astr_main_agent.py",1540,1598],["astrbot/core/astr_main_agent.py",1603,1668],["astrbot/core/astr_main_agent.py",1697,1731]]
+  },
+  "AstrAgentContext": {
+    "role": "与单次 AstrBot Agent 运行相关的业务上下文：把插件服务 Context、当前 AstrMessageEvent 和附加数据放在一起，供工具及 hooks 使用。",
+    "logic": ["创建时注入插件 Context 和本次 event；extra 默认是独立字典。build_main_agent() 创建它后，再用 AgentContextWrapper 包起来交给 Runner。", "本地工具执行器从 run_context.context.event 取得事件；通过 run_context.context.context 可访问插件服务。"],
+    "data": ["context 是共享的 astrbot.core.star.context.Context；event 是本轮消息事件；extra 是该 Agent 上下文的扩展键值数据。"],
+    "caveats": ["AgentContextWrapper 只是 ContextWrapper[AstrAgentContext] 的类型别名；它与本数据对象及插件 Context 不是同一层。"],
+    "sources": [["astrbot/core/astr_agent_context.py",1,22],["astrbot/core/astr_main_agent.py",1893,1897],["astrbot/core/astr_main_agent.py",2002,2009],["astrbot/core/astr_agent_tool_exec.py",685,695]]
+  },
+  "ContextWrapper": {
+    "role": "Agent 框架通用的运行上下文容器，保存业务上下文、运行期间的消息列表和工具调用超时。",
+    "logic": ["泛型字段 context 可承载不同业务的上下文；在 AstrBot 主 Agent 中通常承载 AstrAgentContext。", "messages 由 Agent Runner 维护，用于保存本次运行的模型消息；tool_call_timeout 传递给工具执行路径，默认 120 秒。", "Runner.reset() 接收整个包装，执行工具时再交给 FunctionToolExecutor 或其他工具执行器。"],
+    "data": ["访问层次为 ContextWrapper.context → AstrAgentContext → 插件 Context / AstrMessageEvent；messages 并不是插件 Context 本身。"],
+    "caveats": ["这是泛型类型，context 不总是 AstrAgentContext；NoContext 表示无业务上下文的另一种用法。"],
+    "sources": [["astrbot/core/agent/run_context.py",1,23],["astrbot/core/astr_agent_context.py",10,22],["astrbot/core/agent/runners/tool_loop_agent_runner.py",210,215],["astrbot/core/agent/runners/tool_loop_agent_runner.py",278,282]]
+  },
+  "AgentRequestSubStage": {
+    "role": "Pipeline 的 Agent 请求分发阶段：依据配置选择本地或第三方 Agent 子阶段，并在每个事件到来时检查是否允许发起模型请求。",
+    "logic": ["initialize() 保存 PipelineContext 和配置，去掉与 Bot 唤醒前缀重复的 Provider 前缀，规范化 agent_runner 设置后实例化并初始化 InternalAgentSubStage 或 ThirdPartyAgentSubStage。", "process() 检查当前配置是否启用 AI，以及 SessionServiceManager 是否允许此会话发起 LLM 请求；任一不满足便跳过。", "满足条件时记录 agent_start，异步遍历所选子阶段的 process(event, provider_wake_prefix)，透传其 yield；异常与正常结束分别记录 agent_end。"],
+    "data": ["输入为 AstrMessageEvent 和当前 PipelineContext 对应配置；此阶段把事件和处理后的唤醒前缀传给具体子阶段。"],
+    "caveats": ["此类负责选择和转交，并不直接调用模型；真正的本地模型工具循环和第三方 Agent 在各自子阶段中实现。", "子阶段在 initialize() 时按配置选择，并非每处理一个事件都重新实例化。"],
+    "sources": [["astrbot/core/pipeline/process_stage/method/agent_request.py",14,37],["astrbot/core/pipeline/process_stage/method/agent_request.py",39,80]]
+  },
+  "InternalAgentSubStage": {
+    "role": "本地 Agent 路径的 Pipeline 子阶段，负责把消息事件转成交给主 Agent 的请求，运行 Agent，并将结果接回消息发送和会话历史流程。",
+    "logic": ["initialize() 从当前 PipelineContext 配置读取模型、流式、工具超时、上下文压缩和显示策略等，并准备主 Agent 构建参数。", "process() 检查文本、媒体、引用或插件提供的请求是否存在；处理 follow-up、输入状态和等待 LLM 的钩子，并检查额外唤醒前缀。", "对 UMO 获取会话锁后再次检查配置与会话是否仍允许 LLM 请求，调用 build_main_agent(..., apply_reset=False)；若构建失败则根据事件中的错误信息处理并返回。", "取得 runner、request、provider 和延迟 reset 协程，经过 OnLLMRequestEvent 钩子和图片处理后完成 reset，再根据流式能力和配置调用 run_agent。", "流式时可将异步响应流放到 MessageEventResult，普通路径迭代 run_agent；结束后获取最终 LLMResponse，并在相应条件下保存历史。"],
+    "data": ["输入是当前事件及 Provider 唤醒前缀；主要中间对象是 MainAgentBuildConfig、MainAgentBuildResult、ProviderRequest、AgentRunner 和 MessageEventResult。"],
+    "caveats": ["相同 UMO 的处理有会话锁，排队期间配置可能变化，所以加锁后会再次判断；不能把其视为总是立即调用模型。", "事件可因钩子、无内容、唤醒条件、取消或构建失败提前结束；流式分支的结果与非流式处理不同。"],
+    "sources": [["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",78,114],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",167,200],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",221,286],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",307,325],["astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py",394,467]]
+  },
+  "ProviderManager": {
+    "role": "管理和选择模型提供商实例，按聊天、语音识别、语音合成等类别维护可用服务，同时持有 FunctionToolManager。",
+    "logic": ["initialize() 遍历配置并调用 load_provider()；每个实例加载失败会被记录，不一定阻断其余实例。随后根据保存的默认选择和实例列表确定当前对象。", "load_provider() 合并来源配置，跳过禁用项，动态导入配置指定的适配器，并通过注册信息加载对应 Provider。", "get_using_provider_async(type, umo) 先读取会话级 Provider 偏好，再由 _resolve_using_provider() 在实例映射、会话配置及可用列表之间回退。", "初始化末尾通过后台任务调用 llm_tools.init_mcp_clients()；MCP 初始化与 Provider 实例加载不是同一个同步步骤。"],
+    "data": ["providers_config 提供实例配置；inst_map 用 ID 查对象；provider_insts 等列表保存不同类别的提供商；llm_tools 是 FunctionToolManager。"],
+    "caveats": ["找不到 Provider、功能被禁用或缺少可用实例时可能返回 None；不同 Provider 类型的回退规则并不完全相同。", "后台启动 MCP 不表示 initialize() 返回时所有 MCP 服务均已连接成功。"],
+    "sources": [["astrbot/core/provider/manager.py",36,98],["astrbot/core/provider/manager.py",244,315],["astrbot/core/provider/manager.py",342,370],["astrbot/core/provider/manager.py",444,454],["astrbot/core/provider/manager.py",712,759]]
+  },
+  "Provider": {
+    "role": "聊天模型提供商的抽象契约，定义请求文本对话、模型列表和 API Key 管理等接口，具体厂商适配由子类完成。",
+    "logic": ["继承 AbstractProvider，保存 provider_config、provider_settings 与模型状态；get_models()、text_chat() 等抽象方法要求具体实现。", "text_chat() 的契约接收 prompt、上下文、媒体、ToolSet、系统提示和工具结果等，并返回统一 LLMResponse。", "text_chat_stream() 声明异步流式接口；基类默认抛 NotImplementedError，具体流式支持取决于子类。"],
+    "data": ["ProviderRequest 中的内容由 Runner 按 Provider 方法参数传递；具体 Provider 负责适配远程 API 并产生 LLMResponse。"],
+    "caveats": ["抽象基类本身不代表已经实现网络请求或所有厂商协议；阅读具体子类才能了解实际请求格式、错误处理和支持能力。"],
+    "sources": [["astrbot/core/provider/provider.py",33,50],["astrbot/core/provider/provider.py",75,120],["astrbot/core/provider/provider.py",144,181]]
+  },
+  "LLMResponse": {
+    "role": "模型提供商返回的统一结果，可能包含文本或消息链、工具调用、推理内容、原始响应、流式标记和 token 用量。",
+    "logic": ["初始化时将未给出的工具调用名称、参数、ID 等设为空集合；role 标记 assistant、tool 或 err 等响应角色。", "读取 completion_text 时若 result_chain 存在，会从消息链取纯文本，否则返回内部文本字段；设置时也根据是否存在消息链走不同分支。", "to_openai_tool_calls_model() 根据工具调用参数、名称与 ID 构造 ToolCall 模型列表，并将参数 JSON 序列化。", "Runner 识别工具调用后会依名称和参数继续执行工具；没有后续工具调用时可据响应完成最终结果。"],
+    "data": ["tools_call_name、tools_call_args、tools_call_ids 是按索引对应的列表；raw_completion 保留具体 Provider 原始对象，usage 是可选 TokenUsage。"],
+    "caveats": ["is_chunk 为真时对象可能只是流式片段，不等于完整回答；result_chain、completion_text、工具调用也不保证同时存在。", "LLMResponse 是模型结果，AgentResponse 是 Runner 对执行过程的产出包装，两者职责不同。"],
+    "sources": [["astrbot/core/provider/entities.py",454,486],["astrbot/core/provider/entities.py",488,561],["astrbot/core/provider/entities.py",583,600],["astrbot/core/agent/runners/tool_loop_agent_runner.py",1178,1201]]
+  },
+  "FunctionTool": {
+    "role": "AstrBot 内部统一的函数工具描述与调用契约，继承 ToolSchema，并由本地工具、MCPTool 和权限包装等具体对象使用。",
+    "logic": ["继承的 name、description、parameters 描述模型可见工具，其中 parameters 是 JSON Schema；ToolSchema 的校验器检查其 schema 是否有效。", "handler 可保存装饰器注册的异步处理函数；active 标明启用状态，is_background_task 指示后台执行。", "基础 call() 抛出 NotImplementedError；实际工具可提供 handler，或由子类实现 call 等执行入口。FunctionToolExecutor 负责选择调用方式。"],
+    "data": ["FunctionTool 是工具定义与执行入口，不是模型返回的工具调用，也不是 CallToolResult 执行结果。"],
+    "caveats": ["ToolSet 中可能存在权限代理或轻量 schema 对象，单看该对象名称不能假设其 handler 一定存在。"],
+    "sources": [["astrbot/core/agent/tool.py",20,38],["astrbot/core/agent/tool.py",41,74],["astrbot/core/astr_agent_tool_exec.py",697,717]]
+  },
+  "_PermissionGuardedTool": {
+    "role": "非内置 FunctionTool 的权限代理。FunctionToolManager 在提供工具集时创建它，在实际执行前检查当前事件是否允许使用被包装工具。",
+    "logic": ["构造时复制原工具的名称、描述和参数，并保存 _wrapped 与 _mgr；代理自己的 handler 故意保持 None，使执行器进入重写 call 的路径。", "call() 先由 manager._check_tool_permission() 读取配置并检查权限；有错误则直接返回错误信息。", "通过后依次委托原工具 handler、重写的 call 或兼容 run；如果原处理器返回异步生成器，包装器消费并返回最后一项。"],
+    "data": ["外层是 _PermissionGuardedTool，_wrapped 才是原始插件工具或 MCPTool；上下文中 event 被用于权限判断和调用本地处理器。"],
+    "caveats": ["内置工具及其自身权限策略不能简单概括为都由此代理完成；包装后的 MCP 工具先以代理类型经过执行器，再由代理委托 MCPTool.call()。", "这里的包装用于访问控制，与 MCPTool 将 MCP 描述适配成 FunctionTool 是两层不同作用。"],
+    "sources": [["astrbot/core/provider/func_tool_manager.py",214,285],["astrbot/core/provider/func_tool_manager.py",460,513],["astrbot/core/astr_agent_tool_exec.py",685,717]]
+  },
+  "build_main_agent": {
+    "role": "为当前消息准备主 Agent 的请求、依赖和运行器。它是异步构建函数，不是实际反复向模型发请求的循环；真正运行由返回结果中的 agent_runner 负责。",
+    "logic": [
+      "优先使用传入的 provider，否则通过 _select_provider 根据事件和插件上下文选择；找不到可用 Provider 时向事件写入错误信息并返回 None。",
+      "没有预制请求，或现有请求尚未包含引用消息而事件包含引用消息时，调用 collect_initial_request()，从事件、会话和媒体信息准备 ProviderRequest；收集失败时返回 None。",
+      "准备图片并去重媒体引用，可按配置提取文件、处理引用消息、应用插件请求装饰和知识库内容；请求既没有文本、图片、音频也没有附件时直接返回 None。",
+      "填充 session_id，处理插件工具、搜索工具、安全模式和运行环境工具。创建 AstrAgentContext(context=plugin_context, event=event)，按条件补充定时任务、主动发送等内置工具。",
+      "构造 AgentRunner，调用 reset() 并传入 ProviderRequest、AgentContextWrapper、FunctionToolExecutor、hooks、流式和上下文压缩等配置，最后返回 MainAgentBuildResult。"
+    ],
+    "data": [
+      "输入：AstrMessageEvent、插件服务 Context、MainAgentBuildConfig，以及可选的 Provider、ProviderRequest 和图片处理缓存。",
+      "结果：成功时为 MainAgentBuildResult，包含 agent_runner、provider_request 和 provider；不满足执行条件时为 None。构建过程会修改或补充传入的请求对象。",
+      "AgentContextWrapper 包含 AstrAgentContext，后者再同时持有插件 Context 和当前 event；工具执行器通过这一层取得事件及服务。"
+    ],
+    "caveats": [
+      "apply_reset=False 时不会等待 reset 协程；结果的 reset_coro 需要由调用方随后处理，不能误以为 runner 已完成初始化。",
+      "ProviderRequest 是准备好的模型请求，不等于最终网络协议请求；模型调用和具体厂商格式转换仍由 Runner 与 Provider 协作完成。"
+    ],
+    "sources": [["astrbot/core/astr_main_agent.py",1734,1783],["astrbot/core/astr_main_agent.py",1825,1840],["astrbot/core/astr_main_agent.py",1877,1896],["astrbot/core/astr_main_agent.py",1911,1935],["astrbot/core/astr_main_agent.py",2002,2042]]
+  },
+  "Context": {
+    "role": "插件侧共享服务门面。它把平台、Provider、会话、数据库、配置、知识库和定时任务等核心服务汇集到一个入口，供插件和 Agent 获取；它不是单次模型对话的消息列表。",
+    "logic": [
+      "构造时接收各个管理器、默认配置、数据库和事件队列并保存引用，自身通常将操作委托给这些实际服务。",
+      "get_config(umo) 在没有 umo 时返回默认配置；提供 umo 时调用 AstrBotConfigManager.get_conf(umo) 获取该会话对应配置。",
+      "get_using_provider_async(umo) 调用 ProviderManager 查询当前会话的聊天模型，并校验返回类型；get_llm_tool_manager() 返回 provider_manager.llm_tools。",
+      "send_message(session, message_chain) 可先将会话字符串解析成 MessageSession，查找 platform_insts 中匹配的平台，再调用该实例的 send_by_session()；某些平台不支持主动发送。",
+      "llm_generate() 直接调用选定 Provider 的 text_chat() 返回 LLMResponse；tool_loop_agent() 则建立允许模型反复调用工具的 Agent 运行过程。"
+    ],
+    "data": [
+      "输入和持有物主要是生命周期阶段注入的共享管理器；常用方法接受 UMO、消息链或请求参数。",
+      "与其他 Context 区分：这里是 astrbot.core.star.context.Context；PipelineContext 服务于管道阶段，AstrAgentContext 关联事件和插件服务，ContextWrapper 承载 Agent 运行状态。"
+    ],
+    "caveats": [
+      "llm_generate() 即使传入工具定义，也不会自动执行模型返回的工具调用；需要自动工具循环时使用 tool_loop_agent()。",
+      "主动发送依赖具体平台实现，抽象 Platform 或本 Context 本身不负责所有平台协议转换。"
+    ],
+    "sources": [["astrbot/core/star/context.py",132,182],["astrbot/core/star/context.py",184,226],["astrbot/core/star/context.py",228,267],["astrbot/core/star/context.py",397,399],["astrbot/core/star/context.py",529,558],["astrbot/core/star/context.py",648,694]]
+  },
+  "ProviderRequest": {
+    "role": "一次模型请求在 AstrBot 内部的中间表示，汇总用户输入、上下文、工具定义、系统提示词和关联会话。它连接事件收集与 Agent/Provider 调用。",
+    "logic": [
+      "prompt、image_urls、audio_urls 和 extra_user_content_parts 描述当前输入；contexts 保存已有上下文；func_tool 指向本次请求可见的 ToolSet。",
+      "assemble_context() 将当前文本、多模态引用和额外内容组装成 role=user 的字典。图片引用读取成 data URL，音频按 wav 解析；媒体读取失败时有跳过或占位处理。",
+      "仅有一个普通文本块且无额外内容或媒体时，content 为字符串；否则 content 为内容块数组。返回形状因输入而异。",
+      "append_tool_calls_result() 将传入的 ToolCallsResult 追加到 tool_calls_result；若旧值是单个对象则先转换为列表。Agent 后续轮次使用工具结果继续模型对话。"
+    ],
+    "data": [
+      "session_id 通常关联当前 UMO；conversation 可引用会话对象；model 为 None 时由 Provider 使用默认模型。",
+      "ToolCallsResult 保存模型发出的工具调用信息以及工具结果消息；它不同于 FunctionTool 的定义，也不同于工具执行器返回的 MCP CallToolResult。"
+    ],
+    "caveats": [
+      "assemble_context() 的职责是组装和读取当前媒体引用，不代表最终厂商 HTTP 请求结构；厂商适配由 Provider 后续处理。",
+      "图中同时出现的 contexts、conversation 和单次 prompt 并不是同一对象，理解上下文时要分别查看用途。"
+    ],
+    "sources": [["astrbot/core/provider/entities.py",169,190],["astrbot/core/provider/entities.py",193,219],["astrbot/core/provider/entities.py",235,241],["astrbot/core/provider/entities.py",291,347],["astrbot/core/provider/entities.py",349,418]]
+  },
+  "Agent": {
+    "role": "Agent 的声明性数据类，描述名称、指令、工具、生命周期 hooks 与初始对话；它描述一个 Agent 的配置，不负责模型调用循环。",
+    "logic": [
+      "name 指定身份，instructions 可保存指令；tools 可以包含工具名称或 FunctionTool 对象。",
+      "run_hooks 提供可选的运行钩子，begin_dialogs 保存初始对话。当前定义本身只有字段，没有执行方法。"
+    ],
+    "data": ["输入是创建时给出的字段；其 tools 是声明的工具列表，和实际请求中的 ToolSet、用于迭代执行的 ToolLoopAgentRunner 属于不同层次。"],
+    "caveats": ["不要把此 Agent 数据类与 AgentRunner 运行器视为同一个对象，也不要以该类字段推断其全部调用方。"],
+    "sources": [["astrbot/core/agent/agent.py",1,15]]
+  },
+  "ToolLoopAgentRunner": {
+    "role": "执行本地 Agent 的多轮模型与工具循环：维护一次运行的请求、消息、状态和执行器，把模型工具调用交给工具执行器，再把结果交还给后续模型轮次。",
+    "logic": [
+      "reset() 接收 Provider、ProviderRequest、ContextWrapper、工具执行器和 hooks；建立 ContextManager，初始化状态、停止信号、fallback providers 等运行数据。",
+      "step() 首次运行调用 agent begin hook，将状态转换为运行中；先通过 ContextManager 处理消息，再向 Provider 请求并逐步产出 AgentResponse。",
+      "当 LLMResponse 包含工具调用时，_handle_function_tools() 根据名称、参数和调用 ID 定位工具，执行工具开始 hook，调用 tool_executor.execute() 并处理异步返回。",
+      "工具文本、图片等结果被整理为工具消息；组装 ToolCallsResult 后既扩展 run_context.messages，也通过 req.append_tool_calls_result() 登记到请求。下一轮可基于新消息继续。",
+      "step_until_done(max_step) 持续执行 step() 到终态或步数上限；到上限仍未结束时移除可用工具、注入提示并执行最后一步。"
+    ],
+    "data": [
+      "ProviderRequest 保存本次请求，ContextWrapper 保存本次运行的消息和业务上下文；LLMResponse 是模型输出，AgentResponse 是对运行过程产出的包装。",
+      "工具执行器可能返回 CallToolResult 或消息链，Runner 对其结果进行归一和后续处理；图片可先进入缓存再提供给后续流程。"
+    ],
+    "caveats": [
+      "一次 step 不一定产生最终答案；有工具调用时可继续多轮。流式响应、失败、停止请求和插件 hooks 会改变运行路径。",
+      "skills_like 模式会将请求中的完整工具集替换为轻量 schema，同时保留原工具集及仅参数工具集供后续查询；不能把发送给模型的工具描述误认作可执行对象本身。"
+    ],
+    "sources": [["astrbot/core/agent/runners/tool_loop_agent_runner.py",210,312],["astrbot/core/agent/runners/tool_loop_agent_runner.py",807,839],["astrbot/core/agent/runners/tool_loop_agent_runner.py",1008,1036],["astrbot/core/agent/runners/tool_loop_agent_runner.py",1090,1144],["astrbot/core/agent/runners/tool_loop_agent_runner.py",1146,1201],["astrbot/core/agent/runners/tool_loop_agent_runner.py",1251,1325]]
+  },
+  "FunctionToolManager": {
+    "role": "管理插件工具、MCP 工具以及按需创建的内置工具，并管理 MCP 服务连接的启动和关闭。它负责工具注册与可用集合的准备，不是每次工具调用的执行器。",
+    "logic": [
+      "func_list 保存非内置的插件工具和 MCPTool；builtin_func_list 以工具类为键缓存按需创建的内置工具；_mcp_server_runtime 保存服务运行时。",
+      "_start_mcp_server() 在锁保护下检查同名服务是否正在运行或启动，创建 MCPClient，连接服务并列出 mcp.Tool；每个 mcp.Tool 被包装为 MCPTool 后放入 func_list。",
+      "get_full_tool_set() 遍历当前 func_list，用 _PermissionGuardedTool 包装每个工具，再通过 ToolSet.add_tool() 建立集合；同名工具遵循 ToolSet 的启用状态和覆盖规则。",
+      "权限包装器调用时先读取工具权限配置并检查当前事件；允许后才委托原工具的 handler、重写的 call 或兼容 run。"
+    ],
+    "data": [
+      "MCP 服务返回 mcp.Tool 描述 → MCPTool 适配为 FunctionTool → _PermissionGuardedTool 包装 → ToolSet 可供请求选择。",
+      "内置工具通过 get_builtin_tool() 按需获取；主 Agent 可根据配置和平台能力单独加入请求工具集。"
+    ],
+    "caveats": [
+      "当前 get_full_tool_set() 实现只遍历 func_list，不会自动把 builtin_func_list 中全部内置工具加入结果。",
+      "经过权限包装的 MCPTool 直接暴露给执行器的对象是包装器；它在通过权限检查后再委托原 MCPTool，不能仅按最外层类型判断全部内部调用路径。"
+    ],
+    "sources": [["astrbot/core/provider/func_tool_manager.py",214,269],["astrbot/core/provider/func_tool_manager.py",288,301],["astrbot/core/provider/func_tool_manager.py",453,513],["astrbot/core/provider/func_tool_manager.py",644,710],["astrbot/core/astr_main_agent.py",1911,1935]]
+  },
+  "MCPClient": {
+    "role": "一个 MCP 服务的连接与会话封装，负责建立连接、发现服务工具、调用远程工具、连接关闭和特定连接错误后的重连。",
+    "logic": [
+      "connect_to_server() 启动连接并初始化 MCP 会话；连接状态和清理由拥有连接的任务管理。",
+      "list_tools_and_save() 要求 session 已初始化，调用 session.list_tools()，把 response.tools 保存到 self.tools，并返回 ListToolsResult。",
+      "call_tool_with_reconnect() 使用原始工具名、参数和读取超时调用 session.call_tool()。发生 ClosedResourceError 时尝试重连并由重试机制再次调用，最多两次尝试。",
+      "cleanup() 取消连接任务、等待仍未结束的旧连接任务并设置运行事件，以解除等待者。"
+    ],
+    "data": [
+      "self.tools 是远端声明的 mcp.Tool 列表，不是已经能直接放进 AstrBot ToolSet 的最终包装；FunctionToolManager 再将其逐个包装成 MCPTool。",
+      "远程调用结果为 mcp.types.CallToolResult，包含服务端返回的内容；工具调用超时来自调用参数。"
+    ],
+    "caveats": [
+      "自动重连针对代码列出的 ClosedResourceError；不能推断所有异常都会重试，session 不存在会抛 ValueError。",
+      "本地 mcp_client.py 存在未提交的空白行变动；源码链接指向图声明的仓库提交。"
+    ],
+    "sources": [["astrbot/core/agent/mcp_client.py",392,415],["astrbot/core/agent/mcp_client.py",465,519],["astrbot/core/agent/mcp_client.py",653,659],["astrbot/core/agent/mcp_client.py",726,790]]
+  },
+  "MCPTool": {
+    "role": "FunctionTool 的一个具体实现，将 MCP 服务发现的单个 mcp.Tool 转换为 AstrBot 可注册和执行的工具对象。",
+    "logic": [
+      "构造时接收原始 mcp.Tool、MCPClient 和服务名称；将原始名称中不符合允许字符的片段替换为下划线，作为暴露给模型的名称。",
+      "使用 mcp.Tool 的描述与 inputSchema 构造工具定义，其中 schema 会先经 _normalize_mcp_input_schema() 规范化。",
+      "call(context, **kwargs) 委托 MCPClient.call_tool_with_reconnect()；发送给 MCP 服务的是保存在 mcp_tool.name 中的原始名称，超时取自 context.tool_call_timeout。"
+    ],
+    "data": ["mcp.Tool 是服务提供的工具描述；MCPTool 是 AstrBot 内部的 FunctionTool 子类；调用返回 MCP CallToolResult。"],
+    "caveats": ["提供给模型的名称可能与远端原始工具名不同；调用时不能把清洗后的名称当成远端名称。"],
+    "sources": [["astrbot/core/agent/mcp_client.py",793,820]]
+  },
+  "ToolSet": {
+    "role": "FunctionTool 对象的集合，供一次请求携带可用工具，并向不同 Provider 导出相应 schema；它主要管理工具定义，不直接运行工具。",
+    "logic": [
+      "add_tool() 按名称去重：已有工具为启用而新工具为停用时保留已有项；新工具启用，或已有工具停用时，用新项覆盖。",
+      "get_tool(name) 按名称返回工具对象或 None；后续 Runner 根据模型指定的名称查找工具并交给执行器。",
+      "get_light_tool_set() 为启用的工具创建只含名称、描述和空参数的轻量对象；get_param_only_tool_set() 为启用工具生成仅名称与参数的对象，供 skills_like 模式使用。",
+      "不同 schema 方法将工具描述转换成相应 Provider 所需结构，转换后的定义与执行工具的对象不是同一回事。"
+    ],
+    "data": ["tools 是 FunctionTool 列表，ProviderRequest.func_tool 可以引用 ToolSet；工具的 parameters 是 JSON Schema 形式的参数说明。"],
+    "caveats": ["轻量和仅参数工具集会新建没有 handler 的工具描述；实际执行需要回到原始工具对象或相应执行路径。"],
+    "sources": [["astrbot/core/agent/tool.py",20,38],["astrbot/core/agent/tool.py",41,74],["astrbot/core/agent/tool.py",78,160],["astrbot/core/agent/tool.py",204,270]]
+  },
+  "FunctionToolExecutor": {
+    "role": "AstrBot 的具体工具执行器，接收工具对象、Agent 运行上下文和模型产生的参数，按工具类型选择执行路径，并将结果以异步生成器交还给 Runner。",
+    "logic": [
+      "execute() 先判断 HandoffTool，按参数选择前台或后台子 Agent 路径；如果是 MCPTool 则调用 _execute_mcp()。",
+      "声明为后台任务的其他工具会创建异步任务并注册，立即产出包含 task_id 的 CallToolResult；普通情况进入 _execute_local()。",
+      "_execute_local() 从 run_context.context.event 取得当前事件；缺少事件时报错。它优先选择 handler，其次选择重写的 call，最后兼容 run，并结合调用超时处理执行。",
+      "Runner 消费执行器产生的 CallToolResult 或消息链，再整理为后续模型可用的工具结果。"
+    ],
+    "data": [
+      "输入的 ContextWrapper 内部持有 AstrAgentContext，其 event 用于本地工具和权限检查；**tool_args 来自模型工具调用。",
+      "如果工具外面有 _PermissionGuardedTool，执行器先按包装器进入本地执行路径，由包装器检查权限后再委托内部工具，内部可以是 MCPTool。"
+    ],
+    "caveats": ["MCPTool 不一定总以最外层类型到达 execute()；需要结合是否经过权限包装理解实际分支。"],
+    "sources": [["astrbot/core/astr_agent_tool_exec.py",136,205],["astrbot/core/astr_agent_tool_exec.py",685,721],["astrbot/core/provider/func_tool_manager.py",214,269],["astrbot/core/agent/runners/tool_loop_agent_runner.py",1288,1309]]
+  }
+}

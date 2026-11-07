@@ -1,0 +1,284 @@
+{
+  "AstrBotCoreLifecycle": {
+    "role": "Core 的生命周期编排者，负责按依赖顺序准备配置、共享队列、平台、插件、模型与消息流水线，让它们持有需要的共同服务。它自身不是消息处理阶段。",
+    "logic": [
+      "initialize() 先初始化数据库和共享配置存储，再加载 UmopConfigRouter 与 AstrBotConfigManager，随后创建共享事件队列和平台、Provider、对话、Cron 等管理器。",
+      "它将管理器注入插件 Context，再构造 PluginManager、加载插件并初始化 Provider；load_pipeline_scheduler() 为每个已加载的配置档案构建 PipelineContext 和 PipelineScheduler，并初始化阶段。",
+      "它使用同一个队列、配置管理器和调度器映射创建 EventBus，随后让 PlatformManager 初始化平台适配器；PlatformManager 自身也负责启动平台任务。",
+      "start() 调用 _load() 启动 EventBus.dispatch()、Cron 等后台协程，并执行插件启动完成钩子。"
+    ],
+    "data": [
+      "共享 event_queue 将平台入口与 EventBus 相连。pipeline_scheduler_mapping 的实际键是配置档案 ID，值是该档案对应的 PipelineScheduler。",
+      "PipelineContext 接受当前 AstrBotConfig、PluginManager、配置 ID 和数据库；这些对象会提供给流水线的各个 Stage。"
+    ],
+    "caveats": [
+      "load_pipeline_scheduler() 的文档字符串把映射键称为平台 ID，但代码遍历的是 astrbot_config_mgr.confs 中的配置 ID；阅读运行逻辑时应以代码为准。",
+      "初始化与处理消息是不同阶段：初始化准备依赖，EventBus 和 PipelineScheduler 在随后收到事件时才处理具体消息。"
+    ],
+    "sources": [["astrbot/core/core_lifecycle.py",157,187],["astrbot/core/core_lifecycle.py",207,280],["astrbot/core/core_lifecycle.py",288,303],["astrbot/core/core_lifecycle.py",357,375],["astrbot/core/core_lifecycle.py",460,474],["astrbot/core/platform/manager.py",118,134]]
+  },
+  "AstrBotConfigManager": {
+    "role": "管理配置档案及其元数据，按统一消息来源 UMO 查询消息应该使用哪个配置；EventBus 借此选择对应的流水线。",
+    "logic": [
+      "initialize() 从 SharedPreferences 读取 abconf_mapping，再按照元数据中的路径加载存在的配置文件到 confs。",
+      "get_conf_info(umo) 调用 _load_conf_mapping()：先把 MessageSession 或字符串规范化并校验，再向 UmopConfigRouter 查询配置 ID，用该 ID 查档案元数据。",
+      "UMO 无效、没有匹配规则或元数据不存在时返回默认档案信息；get_conf() 则根据查询结果从 confs 取实际配置，缺失时回退默认配置。"
+    ],
+    "data": [
+      "confs 保存配置 ID 到 AstrBotConfig 的映射；abconf_data 保存档案元数据；ucr 是保存和匹配 UMO 路由的 UmopConfigRouter。",
+      "get_conf_info 返回 ConfInfo 字典，包含 id、name、path；get_conf 返回的是实际 AstrBotConfig 对象。EventBus 使用前者的 id 找 PipelineScheduler。"
+    ],
+    "caveats": [
+      "配置档案信息与配置内容是不同的数据：知道 ConfInfo 不等于已经拿到了实际配置对象。",
+      "初始化前访问档案元数据会引发 RuntimeError；配置文件不存在时会记录警告并跳过加载。"
+    ],
+    "sources": [["astrbot/core/astrbot_config_mgr.py",17,29],["astrbot/core/astrbot_config_mgr.py",32,52],["astrbot/core/astrbot_config_mgr.py",72,129],["astrbot/core/astrbot_config_mgr.py",152,177],["astrbot/core/event_bus.py",61,73]]
+  },
+  "Platform": {
+    "role": "平台适配器基类，提供消息平台运行契约和部分公共实现；它将平台入口与 Core 的事件队列连接起来。",
+    "logic": [
+      "构造时保存平台配置和共享 event_queue，并维护平台状态等信息。run() 和 meta() 是要求具体平台实现的抽象方法。",
+      "commit_event(event) 将 AstrMessageEvent 放入共享队列，之后由 EventBus 消费。基类 create_event(message) 也有默认实现，用消息、平台元数据和会话 ID 创建事件。",
+      "实际平台协议的接收、格式转换与发送需要查看具体适配器及其事件实现；例如 AiocqhttpAdapter 会覆盖 create_event()。"
+    ],
+    "data": [
+      "输入的 AstrBotMessage 表示规范化后的消息；create_event 返回带处理状态及行为的 AstrMessageEvent。_event_queue 传递的是事件，不是原始平台协议数据。"
+    ],
+    "caveats": [
+      "Platform 是抽象基类，但不是只有抽象方法：commit_event 和 create_event 都有具体实现。",
+      "基类 send_by_session() 中有指标上报，不能仅凭调用基类方法就认定消息已经通过平台协议发送。"
+    ],
+    "sources": [["astrbot/core/platform/platform.py",38,49],["astrbot/core/platform/platform.py",121,165],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",492,510]]
+  },
+  "AiocqhttpAdapter": {
+    "role": "OneBot v11 的一个具体平台适配器。它接收 aiocqhttp 的平台事件，将其转换成 Core 可以处理的消息和事件，再投递到共享队列。",
+    "logic": [
+      "初始化 CQHttp 客户端，并分别注册 request、notice、group 和 private 回调；回调先调用 convert_message()。",
+      "convert_message() 按 post_type 分发给消息、通知或请求的转换方法，产出 AstrBotMessage；某些输入会返回 None 而不继续处理。",
+      "handle_msg() 调用本类 create_event()，将 AstrBotMessage、平台元数据、session_id 和 bot 包装成 AiocqhttpMessageEvent，然后通过继承的 commit_event() 投递。"
+    ],
+    "data": [
+      "OneBot Event → AstrBotMessage → AiocqhttpMessageEvent → 共享队列。原始平台事件和 Core 事件不是同一个对象；bot 客户端也被注入具体事件用于平台相关操作。"
+    ],
+    "caveats": [
+      "这里是具体适配器示例，其他平台可使用不同的接入和转换方式；不能把这一实现等同于 Platform 基类的全部行为。",
+      "回调捕获并记录转换或处理异常，因此失败时可能不会产生进入队列的事件。"
+    ],
+    "sources": [["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",35,102],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",128,141],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",492,510],["astrbot/core/platform/platform.py",147,149]]
+  },
+  "AstrMessageEvent": {
+    "role": "跨平台统一的消息事件对象。它把规范化消息与平台、会话、处理状态、结果及追踪信息组合起来，并为后续阶段和插件提供操作接口。",
+    "logic": [
+      "构造时保存 message_str、AstrBotMessage 与平台元数据，将消息类型转换成 MessageType，创建 MessageSession 和 TraceSpan。",
+      "unified_msg_origin 根据当前 session 生成统一来源字符串；session_id 属性读写 session 中的会话 ID，因此会话隔离修改的是事件的会话状态。",
+      "处理阶段或插件可以调用 set_result() 设置结果，传入字符串时会包装成 MessageEventResult；stop_event()、continue_event() 和 is_stopped() 控制传播。"
+    ],
+    "data": [
+      "message_obj 是输入消息内容和结构；session 描述来源；_extras 保存扩展数据；_result 保存处理结果；trace 记录处理过程。",
+      "EventBus 先读取 unified_msg_origin 选择配置，之后可能修改 session_id；同一个事件随后传给 PipelineScheduler。"
+    ],
+    "caveats": [
+      "AstrBotMessage 与 AstrMessageEvent 的职责不同：前者描述消息，后者在消息上承载处理状态和事件操作。",
+      "_force_stopped 独立于 _result；不能因为清除结果就推断事件一定恢复传播。基类是抽象基类，实际平台发送行为需看具体事件实现。"
+    ],
+    "sources": [["astrbot/core/platform/astr_message_event.py",79,130],["astrbot/core/platform/astr_message_event.py",156,175],["astrbot/core/platform/astr_message_event.py",370,421],["astrbot/core/event_bus.py",55,75],["astrbot/core/event_bus.py",104,124]]
+  },
+  "EventBus": {
+    "role": "Core 的事件消费与分发入口：从共享异步队列接收 AstrMessageEvent，根据事件来源选择配置档案和对应的 PipelineScheduler，并为其创建执行任务。",
+    "logic": [
+      "dispatch() 循环等待 event_queue.get()；如果事件所属平台已停止，记录取消并跳过。",
+      "它用当前事件的 unified_msg_origin 调 AstrBotConfigManager.get_conf_info()，取返回的 ConfInfo.id，从 pipeline_scheduler_mapping 选择调度器；没有对应调度器时记录错误并忽略事件。",
+      "选定调度器后，_apply_session_isolation() 根据该调度器上下文中的配置处理群聊会话隔离，再通过 asyncio.create_task(scheduler.execute(event)) 启动流水线。",
+      "任务保存在 _pending_tasks 中保持强引用，完成回调用于清理并记录未捕获异常；stop_platform() 还会处理该平台已排队或正在运行的事件。"
+    ],
+    "data": [
+      "输入：平台提交的 AstrMessageEvent；配置路由中间结果：ConfInfo 字典；下游：选中的 PipelineScheduler 和同一个事件对象。",
+      "event_queue 是跨平台共享队列；pipeline_scheduler_mapping 按配置档案 ID 而不是平台类型索引；stopped_platforms 记录已停止的平台 ID。"
+    ],
+    "caveats": [
+      "配置档案由隔离前的 UMO 决定，之后会话隔离才可能修改 session_id；不能将这两个先后步骤倒置。",
+      "dispatch 创建异步任务后继续取队列，不会等待当前消息的流水线完整结束才接收下一条。"
+    ],
+    "sources": [["astrbot/core/event_bus.py",38,75],["astrbot/core/event_bus.py",77,133],["astrbot/core/astrbot_config_mgr.py",103,129],["astrbot/core/core_lifecycle.py",460,474]]
+  },
+  "PipelineContext": {
+    "role": "一个配置档案对应的流水线共享依赖容器。Stage 初始化时从它读取配置和服务；它本身不是单条消息的事件。",
+    "logic": [
+      "AstrBotCoreLifecycle.load_pipeline_scheduler() 遍历已加载的配置档案，为每个配置创建 PipelineContext，并将它传入对应的 PipelineScheduler。",
+      "PipelineScheduler.initialize() 构建各个 Stage，并将同一个上下文交给各阶段的 initialize()。"
+    ],
+    "data": [
+      "astrbot_config 是当前档案的 AstrBotConfig；plugin_manager 提供插件管理；astrbot_config_id 标识档案；db_helper 可选地提供数据库访问。",
+      "call_handler 和 call_event_hook 暴露管道上下文工具函数，用于调用处理器和事件钩子。"
+    ],
+    "caveats": [
+      "不要把它与 AstrMessageEvent 混为一谈：前者是多个阶段共享的依赖，后者是某次消息处理的输入和状态。",
+      "它也不同于提供插件服务的 star.context.Context；两种 Context 的作用域和成员不同。"
+    ],
+    "sources": [["astrbot/core/pipeline/context.py",15,24],["astrbot/core/core_lifecycle.py",460,474],["astrbot/core/pipeline/scheduler.py",23,36]]
+  },
+  "AstrBotMessage": {
+    "role": "跨平台规范化的输入消息数据对象，保存发送者、会话、消息组件、纯文本和原始平台消息。",
+    "logic": ["具体适配器将原始输入转换成 AstrBotMessage；随后平台 create_event() 将它作为 message_obj 包入 AstrMessageEvent 子类。", "group_id 属性从 group 中读取群 ID；设置非空 ID 时必要时创建 Group，清空时将 group 设为 None。"],
+    "data": ["message 是 BaseMessageComponent 列表，message_str 是纯文本表示；sender 是 MessageMember，group 可为 Group 或 None，raw_message 保存平台原始数据。", "type、self_id、session_id、message_id 和 timestamp 描述消息来源与身份。"],
+    "caveats": ["构造方法只初始化 timestamp 和 group 等少数字段，其他带类型注解的字段需要创建者赋值；消息对象不等同于承载处理状态的 AstrMessageEvent。"],
+    "sources": [["astrbot/core/platform/astrbot_message.py",53,92],["astrbot/core/platform/sources/webchat/webchat_adapter.py",204,226],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",492,510]]
+  },
+  "MessageMember": {
+    "role": "消息发送者或群成员的轻量数据模型，保存 user_id 和可选 nickname。",
+    "logic": ["适配器创建 AstrBotMessage 时可以用此对象填充 sender；Group 也可包含 MessageMember 列表。"],
+    "data": ["user_id 是成员标识；nickname 可以缺失。"],
+    "caveats": ["它描述成员数据，不负责鉴权或判断管理员；事件 role 在其他处理阶段设置。"],
+    "sources": [["astrbot/core/platform/astrbot_message.py",9,18],["astrbot/core/platform/astrbot_message.py",22,35],["astrbot/core/platform/sources/webchat/webchat_adapter.py",204,211],["astrbot/core/pipeline/waking_check/stage.py",75,89]]
+  },
+  "Group": {
+    "role": "群组元数据模型，作为 AstrBotMessage 的可选 group 保存群相关信息。",
+    "logic": ["适配器可为消息构造 Group；AstrBotMessage.group_id 属性代理 group.group_id，必要时会创建或清除 Group。"],
+    "data": ["包括 group_id、可选群名称、头像、群主、管理员列表、成员列表及 member_count。members 中的成员为 MessageMember。"],
+    "caveats": ["member_count 可在成员列表不完整时提供总数，因此不能直接假设它等于 members 的长度。"],
+    "sources": [["astrbot/core/platform/astrbot_message.py",22,37],["astrbot/core/platform/astrbot_message.py",60,61],["astrbot/core/platform/astrbot_message.py",74,92]]
+  },
+  "PlatformMetadata": {
+    "role": "描述平台适配器身份、展示信息及能力的元数据对象，作为统一事件的一部分传递给 Core。",
+    "logic": ["具体适配器构建元数据并通过 meta() 提供；创建事件时将其传给 AstrMessageEvent。"],
+    "data": ["name 表示平台类型，如 aiocqhttp；id 是具体平台实例的唯一标识。其余字段包括展示名称、默认配置、是否支持流式或主动消息。"],
+    "caveats": ["平台类型 name 与实例 id 是两个概念，同一类平台可以有不同实例；UMO 使用的是实例标识。"],
+    "sources": [["astrbot/core/platform/platform_metadata.py",4,26],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",48,53],["astrbot/core/platform/astr_message_event.py",80,92],["astrbot/core/platform/astr_message_event.py",112,116]]
+  },
+  "MessageSession": {
+    "role": "标识消息会话的数据对象，用于构造统一消息来源 UMO 并在配置路由、会话管理等场景传递。",
+    "logic": ["构造后 __post_init__ 将 platform_id 设为 platform_name；__str__ 生成 platform_id:message_type:session_id。", "from_str() 最多按两个冒号拆分，并把第二段解析为 MessageType 后构造 MessageSession。"],
+    "data": ["platform_name 字段实际保存平台实例 ID；message_type 是 MessageType；session_id 标识具体会话。"],
+    "caveats": ["虽然字段名为 platform_name，其文档说明它实际是 platform_id；session_id 中的冒号会保留。MessageSesion 是兼容旧名称的别名。"],
+    "sources": [["astrbot/core/platform/message_session.py",6,30],["astrbot/core/platform/astr_message_event.py",112,116],["astrbot/core/platform/astr_message_event.py",156,175]]
+  },
+  "PluginManager": {
+    "role": "管理插件的发现、加载、重载及注册状态，并将应用服务上下文传递给插件实例。",
+    "logic": ["构造时保存 Context 和 AstrBotConfig，设置插件目录、配置目录和内置插件目录，并将管理器引用写回 Context。", "reload() 使用锁串行化操作，终止并解绑已加载插件或指定插件，再调用 load()。", "load() 读取停用插件及工具等配置，发现插件模块并尝试导入、实例化插件类；加载成功的元数据登记到 star_map 和 star_registry。"],
+    "data": ["context 是提供各服务的插件 Context；star_registry 和 star_map 维护已注册插件元数据；star_handlers_registry 保存处理器注册信息。"],
+    "caveats": ["管理器负责插件生命周期与注册，不等同于直接处理每条消息；后续 WakingCheckStage 和 ProcessStage 等从注册信息中选择和调用处理器。", "加载失败可能留下失败记录，清理流程会移除对应模块、插件元数据、处理器、工具与平台适配器注册。"],
+    "sources": [["astrbot/core/star/star_manager.py",193,223],["astrbot/core/star/star_manager.py",776,819],["astrbot/core/star/star_manager.py",1018,1105],["astrbot/core/star/star_manager.py",1326,1373],["astrbot/core/pipeline/waking_check/stage.py",145,161],["astrbot/core/pipeline/process_stage/stage.py",43,60]]
+  },
+  "aiocqhttp.convert_message": {
+    "role": "AiocqhttpAdapter 的重要转换方法，把 OneBot 事件分派给对应处理方法并得到 AstrBotMessage。",
+    "logic": ["根据 Event 的 post_type，分别调用 _convert_handle_message_event、_convert_handle_notice_event 或 _convert_handle_request_event；指定发送者的消息被过滤为 None。", "平台回调得到非空消息后调用 handle_msg，最终将其包装为事件并入队。"],
+    "data": ["输入是 OneBot Event；输出是 AstrBotMessage 或 None，不是完整的 AstrMessageEvent。"],
+    "caveats": ["图中此方法被提升为单独节点以突出转换，但它仍属于 AiocqhttpAdapter，并非独立类。"],
+    "sources": [["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",64,102],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",128,141],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",509,510]]
+  },
+  "aiocqhttp.create_event": {
+    "role": "AiocqhttpAdapter 的事件包装方法，为规范化消息创建该平台专用的事件子类。",
+    "logic": ["从 AstrBotMessage 取 message_str 和 session_id，结合适配器 meta() 与 bot 创建 AiocqhttpMessageEvent；handle_msg 再调用 commit_event。"],
+    "data": ["AstrBotMessage → AiocqhttpMessageEvent；消息对象被保存在新事件中，bot 客户端供平台专用发送逻辑使用。"],
+    "caveats": ["该方法属于具体适配器；Platform 基类也有 create_event 的默认实现，但此处运行的是子类覆盖版本。"],
+    "sources": [["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",492,510],["astrbot/core/platform/platform.py",151,165],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py",23,33]]
+  },
+  "InitialLoader": {
+    "role": "启动 Core 和仪表板的进程级编排入口，持有已传入的数据库和日志代理。",
+    "logic": ["start() 用日志代理和数据库构造 AstrBotCoreLifecycle，并先等待 initialize()；初始化异常会记录严重错误并返回。", "初始化成功后建立 Core start 协程和 AstrBotDashboard；仪表板有可运行协程时用 asyncio.gather 并发运行，否则只等待 Core。", "任务被取消时调用 core_lifecycle.stop() 进行关闭。"],
+    "data": ["db 与 log_broker 被传入生命周期对象；同一个 db 和生命周期对象也传给仪表板。webui_dir 作为可选的前端资源目录传入。"],
+    "caveats": ["这个类负责启动编排，不负责对单条消息进行转换或运行流水线。"],
+    "sources": [["astrbot/core/initial_loader.py",17,57]]
+  },
+  "UmopConfigRouter": {
+    "role": "保存统一消息来源模式到配置档案 ID 的路由表，供 AstrBotConfigManager 查找会话使用的配置。",
+    "logic": ["initialize() 从 SharedPreferences 读取全局 umop_config_routing。", "get_conf_id_for_umop() 顺序检查路由表，使用 _is_umo_match() 逐段比较，返回第一个匹配的配置 ID；没有匹配返回 None。", "update_routing_data() 校验并替换整个路由表；update_route() 更新一项；两者均写回共享存储。"],
+    "data": ["UMO 由平台 ID、消息类型、会话 ID 三段构成，_split_umo 最多分割两次以保留会话 ID 内的冒号；模式可用通配符，空段匹配任意值。"],
+    "caveats": ["结果是配置 ID 而不是 AstrBotConfig；匹配按现有字典顺序返回首个结果，不应假定自动选择最具体模式。"],
+    "sources": [["astrbot/core/umop_config_router.py",6,26],["astrbot/core/umop_config_router.py",28,61],["astrbot/core/umop_config_router.py",63,100],["astrbot/core/astrbot_config_mgr.py",103,129]]
+  },
+  "PlatformManager": {
+    "role": "加载、保存和管理 Platform 具体适配器及其运行任务，并把共享事件队列交给各平台实例。",
+    "logic": ["initialize() 遍历平台配置，检查 webhook 配置并调用 load_platform()，随后额外构造 WebChatAdapter 并启动其任务。", "load_platform() 跳过未启用的配置、检查平台 ID，按配置类型导入适配器，再通过 platform_cls_map 取得注册类并实例化。", "实例加入列表和 ID 映射，_start_platform_task() 创建实际运行任务及包装任务；随后触发平台加载钩子。"],
+    "data": ["platform_insts 保存已加载的 Platform 实例；_inst_map 关联配置 ID 和实例；_platform_tasks 以 client_self_id 保存运行和包装任务；event_queue 被所有适配器共享。"],
+    "caveats": ["平台实例由具体注册类创建，不是直接实例化抽象 Platform；类型未知或导入失败时会记录错误，无法得到该适配器。"],
+    "sources": [["astrbot/core/platform/manager.py",23,39],["astrbot/core/platform/manager.py",52,75],["astrbot/core/platform/manager.py",104,142],["astrbot/core/platform/manager.py",220,255]]
+  },
+  "AiocqhttpMessageEvent": {
+    "role": "OneBot 适配器使用的 AstrMessageEvent 子类，在统一事件接口之外持有 CQHttp 客户端并实现协议侧发送。",
+    "logic": ["由 AiocqhttpAdapter.create_event() 构造，继承统一事件状态并保存 bot。", "send() 从原始消息获取 event，判断群聊或私聊及目标 ID，调用 send_message()。", "send_message() 将 MessageChain 转为 OneBot 消息段；_dispatch_send() 优先按数字目标调用群聊或私聊 API，否则使用可用的原始 Event 回退。"],
+    "data": ["输入为内部 MessageChain，输出为 OneBot 消息段列表和 CQHttp 发送调用；send() 完成后还调用基类 send()。"],
+    "caveats": ["如果既没有有效数字目标，也没有可用于回退的原始 Event，_dispatch_send 会抛出 ValueError。"],
+    "sources": [["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py",23,33],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py",91,153],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py",184,198],["astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py",492,510]]
+  },
+  "WebChatAdapter": {
+    "role": "将 WebChat 输入队列中的请求转换为统一消息事件，接入与其他平台相同的 Core 流水线。",
+    "logic": ["run() 创建 QueueListener，由它在 WebChatQueueMgr 上注册异步 callback。", "callback 将 (username, cid, payload) 交给 convert_message()，解析消息段并构造 AstrBotMessage，再调用 handle_msg()。", "create_event() 包装为 WebChatMessageEvent，并把 locale、请求标记、选择的 Provider/模型等可用请求信息放入事件 extras，最后由 commit_event() 投递。"],
+    "data": ["输入是用户名、会话标识和请求 payload 元组；输出依次是 AstrBotMessage、WebChatMessageEvent，最终进入共享事件队列。session_id 构造成 webchat!用户名!cid。"],
+    "caveats": ["WebChat 的请求监听由 QueueListener 和 WebChatQueueMgr 协作，不是 OneBot 网络回调；具体回复走 WebChatMessageEvent。"],
+    "sources": [["astrbot/core/platform/sources/webchat/webchat_adapter.py",41,84],["astrbot/core/platform/sources/webchat/webchat_adapter.py",162,202],["astrbot/core/platform/sources/webchat/webchat_adapter.py",204,234],["astrbot/core/platform/sources/webchat/webchat_adapter.py",239,285]]
+  },
+  "WebChatMessageEvent": {
+    "role": "WebChat 对应的 AstrMessageEvent 子类，负责将内部回复转换为 WebChat 请求可读取的输出帧。",
+    "logic": ["send() 取得 message_obj.message_id，调用 _send() 将消息写回 WebChatQueueMgr，然后调用基类 send()。", "_send() 按 MessageChain 中的组件写入对应类型的输出帧；没有消息时写入 type=end 的结束帧。", "send_streaming() 处理流式结果，send_typing() 可发送 run_started 信号。"],
+    "data": ["MessageChain 中的组件会转为带 type、data、streaming、message_id 等字段的输出字典，按 request_id 写入回传队列。"],
+    "caveats": ["PipelineScheduler 对 WebChat 事件调用 send(None) 是结束信号，并不意味着发送文字 'None'。"],
+    "sources": [["astrbot/core/platform/sources/webchat/webchat_event.py",23,64],["astrbot/core/platform/sources/webchat/webchat_event.py",151,199],["astrbot/core/pipeline/scheduler.py",91,100]]
+  },
+  "Stage": {
+    "role": "Pipeline 阶段的抽象接口；每个具体 Stage 负责消息处理中的一段工作，由 PipelineScheduler 创建和调度。",
+    "logic": ["register_stage 装饰器将具体类添加到 registered_stages。", "具体类实现 initialize(ctx) 接收 PipelineContext，并实现 process(event) 处理 AstrMessageEvent；PipelineScheduler 按 STAGES_ORDER 排序并调用。"],
+    "data": ["initialize 接收阶段共享依赖；process 接收同一个事件对象，可以返回普通协程结果或异步生成器，并通过事件状态或结果影响下游。"],
+    "caveats": ["Stage.process 的文档对返回 None 的描述不能代替调度器真实控制逻辑：实际代码等待普通协程后继续循环，事件停止还需检查 event.is_stopped()。", "异步生成器 yield 时调度器会递归执行后续阶段并再恢复当前生成器。"],
+    "sources": [["astrbot/core/pipeline/stage.py",10,45],["astrbot/core/pipeline/scheduler.py",23,36],["astrbot/core/pipeline/scheduler.py",38,82],["astrbot/core/pipeline/stage_order.py",3,13]]
+  },
+  "WakingCheckStage": {
+    "role": "判断输入是否唤醒机器人，同时确定用户角色和可激活的插件处理器，为后续处理准备事件状态。",
+    "logic": ["initialize() 读取唤醒、权限、是否忽略机器人自身消息等设置。", "process() 可忽略自身消息、设置管理员身份，根据唤醒前缀、@、引用及私聊规则更新 is_wake 和 is_at_or_wake_command，并处理前缀。", "它遍历插件处理器及其过滤器，按插件集和权限等条件收集可激活处理器；过滤异常或权限失败的特定分支会回复并停止事件。"],
+    "data": ["消费 AstrMessageEvent 的文本、消息组件、发送者和平台配置，改变 event.role、event.message_str、event.is_wake 等状态，并为后续插件处理准备匹配结果。"],
+    "caveats": ["is_wake 与 is_at_or_wake_command 不完全等价：插件过滤器命中也能使事件唤醒，不能据此推断一定有 @ 或唤醒词。"],
+    "sources": [["astrbot/core/pipeline/waking_check/stage.py",20,61],["astrbot/core/pipeline/waking_check/stage.py",63,144],["astrbot/core/pipeline/waking_check/stage.py",145,235],["astrbot/core/platform/astr_message_event.py",93,98]]
+  },
+  "WhitelistCheckStage": {
+    "role": "按配置对会话进行白名单检查，必要时停止消息事件传播。",
+    "logic": ["initialize() 读取开关、白名单、管理员豁免和日志设置，并清理白名单文本。", "process() 在未启用、列表为空或 WebChat 来源时直接跳过检查；按群聊/私聊管理员豁免规则也可能跳过。", "事件 UMO 与群 ID 都不在白名单时调用 event.stop_event()，可按配置记录日志。"],
+    "data": ["检查 event.unified_msg_origin、群 ID、消息类型和 role；配置中的白名单作为匹配依据。"],
+    "caveats": ["列表为空表示不检查，不是阻止所有消息；WebChat 在此阶段被明确豁免。"],
+    "sources": [["astrbot/core/pipeline/whitelist_check/stage.py",11,71]]
+  },
+  "SessionStatusCheckStage": {
+    "role": "检查当前会话整体是否启用；禁用时阻止事件继续经过后续处理。",
+    "logic": ["initialize() 从插件 Context 取得 ConversationManager。", "process() 调用 SessionServiceManager.is_session_enabled(event.unified_msg_origin)；若会话禁用，则在需要时补建当前会话记录，随后 stop_event()。"],
+    "data": ["输入为事件的 UMO 和平台 ID；可能读取或创建对应对话记录，最终修改事件传播状态。"],
+    "caveats": ["禁用会话和配置档案选择是不同判断；这里通过会话服务状态决定是否继续。"],
+    "sources": [["astrbot/core/pipeline/session_status_check/stage.py",11,40]]
+  },
+  "RateLimitStage": {
+    "role": "按会话限制消息处理频率，超限时依据配置暂停或丢弃当前事件。",
+    "logic": ["initialize() 加载次数、时间窗口和 stall/discard 策略。", "process() 以 UMO 为键取得会话锁和时间戳队列，清理窗口外记录；未超限时追加当前时间。", "超限时 stall 策略等待后再次检查；discard 策略调用 event.stop_event()。"],
+    "data": ["event_timestamps 是 UMO 到时间戳队列的映射；locks 为同一 UMO 的并发修改提供锁。"],
+    "caveats": ["rate_limit_count 不大于零时直接返回；超限不一定丢弃，还可能等待。"],
+    "sources": [["astrbot/core/pipeline/rate_limit_check/stage.py",15,41],["astrbot/core/pipeline/rate_limit_check/stage.py",43,108]]
+  },
+  "ContentSafetyCheckStage": {
+    "role": "对输入或显式提供的回复文本执行配置驱动的内容安全检查。",
+    "logic": ["initialize() 使用 content_safety 配置构造 StrategySelector。", "未显式传 check_text 时，process() 汇总事件文本及引用消息中可提取的文本；否则检查给定文本。", "策略拒绝时，若事件通过 @ 或唤醒命令触发，会设置阻止提示并 yield；随后停止事件并记录原因。"],
+    "data": ["输入文本经拼接后交给 strategy_selector.check()，返回是否通过及说明；结果可写入 MessageEventResult 并影响事件传播。"],
+    "caveats": ["当前类注释说明只检查文本；调用方 ResultDecorateStage 也会在符合配置时将回复文本交给此阶段检查。"],
+    "sources": [["astrbot/core/pipeline/content_safety_check/stage.py",14,56],["astrbot/core/pipeline/result_decorate/stage.py",139,156]]
+  },
+  "PreProcessStage": {
+    "role": "在插件和 Agent 处理前整理事件消息及媒体，使下游更容易使用统一的文件路径和内容。",
+    "logic": ["initialize() 获取当前配置、插件管理器及语音和平台设置。", "process() 可按配置发送预响应表情，对图片和语音消息段执行路径映射；随后尝试将语音转换为 WAV、将图片转换并验证为本地文件。", "引用消息中的媒体组件也会进入相关处理；媒体转换失败时记录警告。"],
+    "data": ["输入是事件消息链中的 Image、Record、Reply 等组件；处理可更新组件的 url、file 或 path，并追踪属于事件的临时文件。"],
+    "caveats": ["并非所有平台或事件都发送预响应表情；是否执行取决于平台、配置和事件唤醒状态。", "此阶段处理媒体不意味着已经生成模型请求，后续 Agent 请求构造还会进一步包装数据。"],
+    "sources": [["astrbot/core/pipeline/preprocess_stage/stage.py",24,32],["astrbot/core/pipeline/preprocess_stage/stage.py",34,49],["astrbot/core/pipeline/preprocess_stage/stage.py",65,97],["astrbot/core/pipeline/preprocess_stage/stage.py",99,200]]
+  },
+  "PipelineScheduler": {
+    "role": "按配置档案调度消息处理阶段。它创建并持有 Stage 实例，接收 EventBus 转交的事件，并按阶段顺序推进处理。",
+    "logic": [
+      "构造时确保内置 Stage 已注册，将 registered_stages 按 STAGES_ORDER 排序；initialize() 创建阶段实例，并向每个阶段传入 PipelineContext。",
+      "execute(event) 建立日志、当前事件和 trace 上下文，再调用 _process_stages(event)。",
+      "如果某阶段 process 返回普通协程，调度器等待它结束并继续循环；如果返回异步生成器，则在每次 yield 暂停点递归执行后续阶段，再返回当前生成器继续后置处理。",
+      "在处理过程中若 event.is_stopped() 为真，则中断相应传播；WebChat 和 WecomAI 的事件在处理结束后还会发送 None 结束帧。"
+    ],
+    "data": [
+      "ctx 保存该配置档案的 PipelineContext；stages 是初始化后的 Stage 实例列表；execute 接收的是 AstrMessageEvent，阶段通过修改事件及其结果来交接状态。"
+    ],
+    "caveats": [
+      "异步生成器的 yield 将前置和后置处理分开，形成洋葱式调用；不能把所有阶段理解为只会从上到下执行一次的普通函数列表。",
+      "阶段处理可以改变事件并停止传播，图中的完整主链不代表每条事件都会执行到末尾。"
+    ],
+    "sources": [["astrbot/core/pipeline/scheduler.py",20,36],["astrbot/core/pipeline/scheduler.py",38,82],["astrbot/core/pipeline/scheduler.py",84,102],["astrbot/core/pipeline/stage_order.py",3,13]]
+  }
+}
